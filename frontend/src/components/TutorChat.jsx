@@ -15,7 +15,10 @@ const Waveform = () => (
   </div>
 );
 
-export const TutorChat = ({ t, lang, book, speed, onBack }) => {
+export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
+  const book = ctx.kind === "book" ? ctx.book : null;
+  const subject = ctx.kind === "lesson" ? ctx.subject : null;
+  const topic = ctx.kind === "lesson" ? ctx.topic : null;
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -27,27 +30,78 @@ export const TutorChat = ({ t, lang, book, speed, onBack }) => {
 
   const scrollDown = () => setTimeout(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }), 50);
 
+  const qs = () => {
+    const p = new URLSearchParams();
+    if (book) p.set("book_id", book.id);
+    if (subject) { p.set("subject", subject); p.set("topic", topic); }
+    return p.toString();
+  };
+
+  const readStream = async (res, aiId) => {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "", full = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop();
+      for (const p of parts) {
+        const line = p.replace(/^data: /, "").trim();
+        if (!line) continue;
+        try {
+          const obj = JSON.parse(line);
+          if (obj.delta) {
+            full += obj.delta;
+            setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: full } : x)));
+            scrollDown();
+          }
+        } catch {}
+      }
+    }
+    return full;
+  };
+
+  const streamExplain = async () => {
+    const aiId = "explain";
+    setMessages([{ role: "assistant", content: "", id: aiId }]);
+    setStreaming(true);
+    scrollDown();
+    try {
+      const res = await fetch(`${API}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject, topic, lang, explain: true }),
+      });
+      const full = await readStream(res, aiId);
+      if (full) speak(full, aiId);
+    } catch {
+      toast.error("Xəta");
+    } finally { setStreaming(false); scrollDown(); }
+  };
+
   useEffect(() => {
     const load = async () => {
-      const seed = [];
-      if (book) {
-        const intro = `${book.explanation}`;
-        seed.push({ role: "assistant", content: intro, id: "intro" });
-      } else {
-        seed.push({ role: "assistant", content: t.welcome, id: "intro" });
-      }
+      let hist = [];
       try {
-        const res = await fetch(`${API}/messages/${book?.id || "general"}`);
-        const hist = await res.json();
-        setMessages([...seed, ...hist]);
-      } catch {
-        setMessages(seed);
+        const res = await fetch(`${API}/messages?${qs()}`);
+        hist = await res.json();
+      } catch {}
+      if (hist.length > 0) { setMessages(hist); scrollDown(); return; }
+      if (book) {
+        setMessages([{ role: "assistant", content: book.explanation, id: "intro" }]);
+        scrollDown();
+      } else if (subject && topic) {
+        streamExplain();
+      } else {
+        setMessages([{ role: "assistant", content: t.welcome, id: "intro" }]);
+        scrollDown();
       }
-      scrollDown();
     };
     load();
     // eslint-disable-next-line
-  }, [book?.id]);
+  }, [book?.id, subject, topic]);
 
   const send = useCallback(async (text) => {
     const msg = (text ?? input).trim();
@@ -63,31 +117,9 @@ export const TutorChat = ({ t, lang, book, speed, onBack }) => {
       const res = await fetch(`${API}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ book_id: book?.id || null, message: msg, lang }),
+        body: JSON.stringify({ book_id: book?.id || null, subject, topic, message: msg, lang }),
       });
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let full = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop();
-        for (const p of parts) {
-          const line = p.replace(/^data: /, "").trim();
-          if (!line) continue;
-          try {
-            const obj = JSON.parse(line);
-            if (obj.delta) {
-              full += obj.delta;
-              setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: full } : x)));
-              scrollDown();
-            }
-          } catch {}
-        }
-      }
+      const full = await readStream(res, aiId);
       if (full) speak(full, aiId);
     } catch {
       toast.error("Xəta");
@@ -95,7 +127,7 @@ export const TutorChat = ({ t, lang, book, speed, onBack }) => {
       setStreaming(false);
       scrollDown();
     }
-  }, [input, streaming, book, lang, speak, stop]);
+  }, [input, streaming, book, subject, topic, lang, speak, stop]);
 
   const startMic = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -127,7 +159,8 @@ export const TutorChat = ({ t, lang, book, speed, onBack }) => {
           <GraduationCap size={30} className="accent-fg" />
         </div>
         <div className="min-w-0">
-          <h2 className="font-heading font-bold text-2xl truncate">{book ? book.title : t.general}</h2>
+          <h2 className="font-heading font-bold text-2xl truncate">{topic || (book ? book.title : t.general)}</h2>
+          {subject && <p className="text-secondary text-base truncate">{subject}</p>}
           {book?.key_topics?.length > 0 && (
             <p className="text-secondary text-base truncate">{book.key_topics.join(" • ")}</p>
           )}

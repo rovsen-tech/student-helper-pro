@@ -96,8 +96,19 @@ class Book(BaseModel):
 
 class ChatRequest(BaseModel):
     book_id: Optional[str] = None
-    message: str
+    subject: Optional[str] = None
+    topic: Optional[str] = None
+    message: str = ""
     lang: str = "az"
+    explain: bool = False
+
+
+def session_key(book_id=None, subject=None, topic=None):
+    if book_id:
+        return f"book-{book_id}"
+    if subject and topic:
+        return "lesson-" + hashlib.md5(f"{subject}|{topic}".encode()).hexdigest()[:12]
+    return "general"
 
 
 class TTSRequest(BaseModel):
@@ -106,23 +117,27 @@ class TTSRequest(BaseModel):
     speed: float = 1.0
 
 
-def tutor_system_message(lang: str, book: Optional[dict]) -> str:
+def tutor_system_message(lang: str, book=None, subject=None, topic=None) -> str:
     lang_name = "Azərbaycan dilində" if lang == "az" else "Türkçe"
     base = (
-        f"Sən 'Ağıllı Müəllim' adlı çox mehriban, səbirli və həvəsləndirici bir müəllimsən. "
-        f"11-14 yaşlı bir uşağa dərs izah edirsən. Uşağın gözləri zəifdir, ona görə cavabların qısa, "
-        f"aydın və başa düşülən olsun. HƏMİŞƏ {lang_name} cavab ver. "
-        f"Çətin anlayışları gündəlik həyatdan sadə bənzətmələrlə izah et (məsələn: hüceyrə nüvəsini məktəb direktoruna bənzət). "
-        f"Uzun paraqraflar yox, qısa cümlələr işlət. Emoji istifadə etmə. "
-        f"Cavabın sonunda uşağı ruhlandıran bir cümlə əlavə et və onu daha çox sual verməyə həvəsləndir."
+        f"Sən 'Ağıllı Dərs' adlı mehriban, səbirli və həvəsləndirici bir müəllimsən. "
+        f"Azərbaycanın 5-ci sinif milli kurikulumuna (2024-2025 tədris ili) uyğun dərs keçirsən. "
+        f"10-11 yaşlı 5-ci sinif şagirdi ilə danışırsan. Şagirdin gözləri zəifdir, ona görə "
+        f"cavabların qısa, aydın və sadə olsun. HƏMİŞƏ {lang_name} cavab ver. "
+        f"Çətin anlayışları gündəlik həyatdan sadə bənzətmələrlə izah et. Qısa cümlələr işlət, "
+        f"emoji istifadə etmə. Cavabın sonunda şagirdi ruhlandır və sual verməyə həvəsləndir."
     )
+    if subject:
+        base += f"\n\nHazırkı fənn: {subject}."
+        if topic:
+            base += f" Mövzu: «{topic}». Cavablarını bu fənn və mövzu ətrafında saxla."
     if book:
         base += (
             f"\n\nHazırda bu dərsliyi öyrənirsiniz:\nBaşlıq: {book.get('title','')}\n"
-            f"Mövzu: {book.get('subject','')}\nXülasə: {book.get('summary','')}\n"
+            f"Xülasə: {book.get('summary','')}\n"
             f"Əsas mövzular: {', '.join(book.get('key_topics', []))}\n"
             f"Detallı məzmun: {book.get('explanation','')[:4000]}\n"
-            f"Uşağın suallarını bu dərsliyin məzmununa əsasən cavablandır."
+            f"Şagirdin suallarını bu dərsliyin məzmununa əsasən cavablandır."
         )
     return base
 
@@ -134,7 +149,12 @@ def make_chat(session_id: str, system_message: str) -> LlmChat:
 
 @api_router.get("/")
 async def root():
-    return {"message": "Ağıllı Müəllim hazırdır"}
+    return {"message": "Ağıllı Dərs hazırdır"}
+
+
+@api_router.get("/subjects")
+async def list_subjects():
+    return SUBJECTS
 
 
 @api_router.get("/books", response_model=List[Book])
@@ -217,28 +237,32 @@ async def chat_stream(req: ChatRequest):
     book = None
     if req.book_id:
         book = await db.books.find_one({"id": req.book_id})
-    session_id = f"chat-{req.book_id or 'general'}"
-    sysmsg = tutor_system_message(req.lang, book)
+    session_id = session_key(req.book_id, req.subject, req.topic)
+    sysmsg = tutor_system_message(req.lang, book, req.subject, req.topic)
 
     history = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(20)
-
     chat = make_chat(session_id, sysmsg)
 
-    await db.messages.insert_one({
-        "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
-        "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
-    })
+    if req.explain:
+        user_text = (f"«{req.topic}» mövzusunu 5-ci sinif şagirdinə uyğun, maraqlı və sadə "
+                     f"şəkildə, gündəlik nümunələrlə izah et. Qısa və aydın saxla.")
+    else:
+        user_text = req.message
+        await db.messages.insert_one({
+            "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
+            "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
+        })
 
     context = ""
-    if history:
+    if history and not req.explain:
         recent = history[-6:]
         context = "Əvvəlki söhbət:\n" + "\n".join(
-            f"{'Uşaq' if m['role']=='user' else 'Müəllim'}: {m['content']}" for m in recent) + "\n\nİndiki sual: "
+            f"{'Şagird' if m['role']=='user' else 'Müəllim'}: {m['content']}" for m in recent) + "\n\nİndiki sual: "
 
     async def gen():
         full = ""
         try:
-            async for ev in chat.stream_message(UserMessage(text=context + req.message)):
+            async for ev in chat.stream_message(UserMessage(text=context + user_text)):
                 if isinstance(ev, TextDelta):
                     full += ev.content
                     yield f"data: {json.dumps({'delta': ev.content})}\n\n"
@@ -257,9 +281,9 @@ async def chat_stream(req: ChatRequest):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-@api_router.get("/messages/{book_id}")
-async def get_messages(book_id: str):
-    session_id = f"chat-{book_id or 'general'}"
+@api_router.get("/messages")
+async def get_messages(book_id: str = None, subject: str = None, topic: str = None):
+    session_id = session_key(book_id, subject, topic)
     docs = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(200)
     return [{"role": d["role"], "content": d["content"], "id": d["id"]} for d in docs]
 
@@ -302,35 +326,37 @@ async def tts(req: TTSRequest):
                     headers={"Cache-Control": "public, max-age=31536000"})
 
 
-SAMPLE_BOOKS = [
-    {
-        "title": "Hüceyrə — Canlıların Ən Kiçik Kərpici",
-        "subject": "Biologiya", "grade": "6-cı sinif",
-        "summary": "Bütün canlılar hüceyrələrdən qurulub. Hüceyrənin hissələri və vəzifələri haqqında öyrənirik.",
-        "key_topics": ["Hüceyrə nüvəsi", "Sitoplazma", "Hüceyrə membranı", "Bitki və heyvan hüceyrələri"],
-        "explanation": "Təsəvvür et ki, hüceyrə balaca bir məktəbdir. Nüvə məktəbin direktorudur — hər şeyi idarə edir. Membran isə məktəbin darvazasıdır: kimin girib-çıxacağına nəzarət edir. Sitoplazma məktəbin dəhlizləri kimidir, hər şey orada üzür. Bədənimizdə milyardlarla belə balaca 'məktəb' var və hamısı birlikdə işləyir!",
-    },
-    {
-        "title": "Günəş Sistemi və Planetlər",
-        "subject": "Təbiət elmləri", "grade": "6-cı sinif",
-        "summary": "Günəş və onun ətrafında fırlanan 8 planet haqqında maraqlı məlumatlar.",
-        "key_topics": ["Günəş", "8 planet", "Yer kürəsi", "Ay və peyklər"],
-        "explanation": "Günəş sistemi böyük bir ailə kimidir. Günəş ata kimidir — ən böyük və isti. 8 planet isə uşaqlar kimi onun ətrafında dövrə vurur. Yer kürəsi bizim evimizdir və üzərində su olan yeganə planetdir. Merkuri Günəşə ən yaxın, ona görə çox istidir; Neptun ən uzaq, ona görə çox soyuqdur!",
-    },
-    {
-        "title": "Kəsrlər və Faizlər",
-        "subject": "Riyaziyyat", "grade": "6-cı sinif",
-        "summary": "Bütövü hissələrə bölmək — kəsrlər və faizlərlə gündəlik hesablamalar.",
-        "key_topics": ["Kəsr nədir", "Kəsrləri toplamaq", "Faiz hesablamaq", "Onluq kəsrlər"],
-        "explanation": "Bir pizza təsəvvür et. Onu 4 bərabər hissəyə böldün — hər hissə 1/4-dür. 2 hissə yesən, 2/4 yəni yarısını yemisən! Faiz isə 'yüzdə neçə' deməkdir. 50% həmişə yarısı deməkdir. Riyaziyyat həyatda hər yerdədir — hətta pizza böləndə belə!",
-    },
-    {
-        "title": "Qədim Şumer Mədəniyyəti",
-        "subject": "Tarix", "grade": "6-cı sinif",
-        "summary": "İlk yazını icad edən, şəhərlər quran qədim Şumerlilər haqqında.",
-        "key_topics": ["Mixi yazı", "İlk şəhərlər", "Ziqquratlar", "Kənd təsərrüfatı"],
-        "explanation": "Təxminən 5000 il əvvəl Şumerlilər yaşayırdı. Onlar dünyada ilk yazını — mixi yazını icad etdilər! Gilin üzərinə çubuqla işarələr yazırdılar. Böyük məbədlər olan ziqquratlar tikirdilər — nəhəng pilləkənli qüllələr kimi. Onlar həm də təkəri icad etdilər. Onlar olmasaydı, bəlkə bu gün yaza bilməzdik!",
-    },
+SUBJECTS = [
+    {"id": "azdili", "name": "Azərbaycan dili", "icon": "BookText", "color": "#DC2626",
+     "description": "Ana dilimiz — səslər, sözlər, cümlələr və mətnlər.",
+     "topics": ["Səslər və hərflər", "Sözün tərkibi", "İsim", "Sifət", "Fel", "Cümlə üzvləri", "Mətn və nitq mədəniyyəti"]},
+    {"id": "riyaziyyat", "name": "Riyaziyyat", "icon": "Calculator", "color": "#2563EB",
+     "description": "Ədədlər, hesablamalar və həndəsə dünyası.",
+     "topics": ["Natural ədədlər", "Adi kəsrlər", "Onluq kəsrlər", "Faiz", "Həndəsi fiqurlar", "Ölçü vahidləri", "Sadə tənliklər"]},
+    {"id": "tebiet", "name": "Təbiət", "icon": "Leaf", "color": "#16A34A",
+     "description": "Canlılar, bitkilər, planetimiz və kainat.",
+     "topics": ["Canlılar aləmi", "Bitkilər", "Heyvanlar", "Su, hava və torpaq", "Günəş sistemi", "Ekologiya və təbiətin qorunması"]},
+    {"id": "informatika", "name": "İnformatika", "icon": "Laptop", "color": "#0891B2",
+     "description": "Kompüter, informasiya və təhlükəsiz internet.",
+     "topics": ["Kompüterin hissələri", "İnformasiya nədir", "Fayl və qovluqlar", "İnternet", "Təhlükəsizlik qaydaları", "Sadə alqoritmlər"]},
+    {"id": "ingilis", "name": "İngilis dili", "icon": "Languages", "color": "#7C3AED",
+     "description": "Learn English — words, phrases and fun.",
+     "topics": ["Alphabet and sounds", "Greetings", "Family members", "Numbers and colours", "Daily routine", "Animals and nature"]},
+    {"id": "tarix", "name": "Tarix", "icon": "Landmark", "color": "#B45309",
+     "description": "Keçmişimiz, qədim dövlətlər və mədəniyyət.",
+     "topics": ["Qədim insanlar", "İlk şəhərlər və dövlətlər", "Azərbaycanın qədim tarixi", "Tarixi abidələr", "Tarixi mənbələr"]},
+    {"id": "musiqi", "name": "Musiqi", "icon": "Music", "color": "#DB2777",
+     "description": "Səslər, notlar və Azərbaycan musiqisi.",
+     "topics": ["Musiqi səsləri", "Notlar", "Musiqi alətləri", "Azərbaycan xalq musiqisi", "Muğam", "Ritm və mahnı"]},
+    {"id": "tesviri", "name": "Təsviri incəsənət", "icon": "Palette", "color": "#EA580C",
+     "description": "Rənglər, rəsm və xalq sənəti.",
+     "topics": ["Rənglər aləmi", "Rəsm növləri", "Kompozisiya", "Milli naxışlar", "Xalça sənəti", "Heykəltəraşlıq"]},
+    {"id": "texnologiya", "name": "Texnologiya", "icon": "Wrench", "color": "#4B5563",
+     "description": "Əl işləri, materiallar və sağlam qida.",
+     "topics": ["Materiallar", "Əl işləri", "Qida və sağlamlıq", "Bitki becərmə", "Təhlükəsizlik qaydaları"]},
+    {"id": "fiziki", "name": "Fiziki tərbiyə", "icon": "Dumbbell", "color": "#059669",
+     "description": "Hərəkət, idman və sağlam həyat tərzi.",
+     "topics": ["Gimnastika", "Atletika", "İdman oyunları", "Sağlam həyat tərzi", "Bədən quruluşu"]},
 ]
 
 
@@ -341,14 +367,8 @@ async def startup():
         logger.info("Storage initialized")
     except Exception as e:
         logger.error(f"Storage init failed: {e}")
-    for sb in SAMPLE_BOOKS:
-        exists = await db.books.find_one({"title": sb["title"]})
-        if not exists:
-            b = Book(is_sample=True, **sb)
-            doc = b.model_dump()
-            doc["is_deleted"] = False
-            await db.books.insert_one(doc)
-    logger.info("Sample books seeded")
+    await db.books.delete_many({"is_sample": True})
+    logger.info("Startup complete")
 
 
 app.include_router(api_router)

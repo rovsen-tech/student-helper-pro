@@ -4,7 +4,8 @@ import axios from "axios";
 import { Toaster } from "@/components/ui/sonner";
 import { DICT } from "@/i18n";
 import { AccessibilityTopBar } from "@/components/AccessibilityTopBar";
-import { BookLibrary } from "@/components/BookLibrary";
+import { Home } from "@/components/Home";
+import { SubjectView } from "@/components/SubjectView";
 import { TutorChat } from "@/components/TutorChat";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -17,7 +18,8 @@ function App() {
   const [fontStep, setFontStep] = useState(0);
   const [speed, setSpeed] = useState(1.0);
   const [books, setBooks] = useState([]);
-  const [active, setActive] = useState(undefined); // undefined = library, null = general chat, obj = book
+  const [subjects, setSubjects] = useState([]);
+  const [view, setView] = useState({ type: "home" });
 
   const t = DICT[lang];
 
@@ -31,15 +33,28 @@ function App() {
     } catch (e) { console.error(e); }
   }, []);
 
-  useEffect(() => { loadBooks(); }, [loadBooks]);
+  useEffect(() => {
+    loadBooks();
+    axios.get(`${API}/subjects`).then((r) => setSubjects(r.data)).catch(() => {});
+  }, [loadBooks]);
 
   return (
     <div className="App">
       <AccessibilityTopBar {...{ t, lang, setLang, theme, setTheme, fontStep, setFontStep, speed, setSpeed }} />
-      {active === undefined ? (
-        <BookLibrary t={t} lang={lang} books={books} onSelect={setActive} onUploaded={loadBooks} />
-      ) : (
-        <TutorChat t={t} lang={lang} book={active} speed={speed} onBack={() => setActive(undefined)} />
+      {view.type === "home" && (
+        <Home t={t} lang={lang} subjects={subjects} books={books}
+          onSubject={(s) => setView({ type: "subject", subject: s })}
+          onChat={(ctx) => setView({ type: "chat", ctx, from: { type: "home" } })}
+          onUploaded={loadBooks} />
+      )}
+      {view.type === "subject" && (
+        <SubjectView t={t} subject={view.subject}
+          onBack={() => setView({ type: "home" })}
+          onLesson={(topic) => setView({ type: "chat", ctx: { kind: "lesson", subject: view.subject.name, topic }, from: { type: "subject", subject: view.subject } })} />
+      )}
+      {view.type === "chat" && (
+        <TutorChat t={t} lang={lang} ctx={view.ctx} speed={speed}
+          onBack={() => setView(view.from || { type: "home" })} />
       )}
       <Toaster position="top-center" richColors />
     </div>
