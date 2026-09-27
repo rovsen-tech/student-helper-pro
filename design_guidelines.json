@@ -1,0 +1,168 @@
+{
+  "project_name": "Gözüm & Bilgim (BrightEar AI - Görən Gözüm)",
+  "app_archetype": "High-Accessibility Multimodal AI Learning Companion for Low-Vision Middle Schoolers (11-14)",
+  "target_audience": "Children aged 11-14 with weak eyesight / visual fatigue who need voice-first and large-print multimodal learning in Azerbaijani and Turkish, parents wanting to scan school books easily",
+  "design_philosophy": "WARM SENSORY CLARITY (Nordic tactile paper warmth + German optical precision + joyful storytelling). Anti-AI-slop: zero generic neon purple gradients, no tiny unreadable grey fonts. Every element has tactile solid contrast, 48px+ touch targets, 18px-32px fluid readable fonts, clear high-contrast borders, natural audio waveforms, and instant bilingual toggle (AZ / TR).",
+  "theme_strategy": {
+    "default_mode": "warm_solar_light",
+    "supported_modes": [
+      {
+        "id": "warm_light",
+        "name": "Ilıq Kağız (Göz Qoruyucu)",
+        "description": "Warm parchment off-white, deep warm charcoal text (prevents glare and photophobia)",
+        "bg": "#FAF7F0",
+        "surface": "#FFFFFF",
+        "surface_elevated": "#F3EFE6",
+        "text_primary": "#1C1917",
+        "text_secondary": "#44403C",
+        "border": "#D6D1C4",
+        "accent": "#0D9488",
+        "accent_warm": "#EA580C",
+        "highlight": "#FEF08A"
+      },
+      {
+        "id": "ultra_dark_amber",
+        "name": "Gecə Kəhrəbası (Yüksək Kontrast)",
+        "description": "Deep obsidian ground with soft warm amber / gold text for photophobic eyes",
+        "bg": "#0C0A09",
+        "surface": "#1C1917",
+        "surface_elevated": "#292524",
+        "text_primary": "#FEF3C7",
+        "text_secondary": "#E7E5E4",
+        "border": "#44403C",
+        "accent": "#F59E0B",
+        "accent_warm": "#FB923C",
+        "highlight": "#78350F"
+      },
+      {
+        "id": "yellow_on_black",
+        "name": "Sarı & Qara (Maksimum Kontrast)",
+        "description": "Certified low-vision contrast: vivid educational yellow on pitch black",
+        "bg": "#000000",
+        "surface": "#121212",
+        "surface_elevated": "#1E1E1E",
+        "text_primary": "#FACC15",
+        "text_secondary": "#FFFFFF",
+        "border": "#FACC15",
+        "accent": "#FDE047",
+        "accent_warm": "#38BDF8",
+        "highlight": "#854D0E"
+      }
+    ]
+  },
+  "typography": {
+    "font_family_heading": "'Lexend', 'Outfit', system-ui, sans-serif",
+    "font_family_body": "'Lexend', 'Plus Jakarta Sans', system-ui, sans-serif",
+    "font_family_mono": "'JetBrains Mono', monospace",
+    "font_import_urls": [
+      "https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600;700;800&family=Outfit:wght@500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap"
+    ],
+    "scale_settings": {
+      "default_base_px": 20,
+      "scale_options": [
+        { "id": "standard", "label": "Böyük (20px)", "base_rem": "1.25rem", "h1": "text-4xl", "body": "text-xl" },
+        { "id": "large", "label": "Çox Böyük (24px)", "base_rem": "1.5rem", "h1": "text-5xl", "body": "text-2xl" },
+        { "id": "giant", "label": "Maksimum (28px)", "base_rem": "1.75rem", "h1": "text-6xl", "body": "text-3xl" }
+      ],
+      "line_height_rule": "Minimum 1.6 to 1.8 line height for body text to prevent visual line crowding",
+      "letter_spacing_rule": "tracking-wide or tracking-normal (never tracking-tighter on small text)"
+    }
+  },
+  "color_palette": {
+    "palette_name": "Warm Amber & Deep Pine (Sensory Safe)",
+    "primary": "#0F766E",
+    "primary_hover": "#115E59",
+    "primary_light": "#CCFBF1",
+    "primary_dark": "#134E4A",
+    "accent_energy": "#EA580C",
+    "accent_friendly_yellow": "#FBBF24",
+    "success": "#16A34A",
+    "info": "#2563EB",
+    "warning": "#D97706",
+    "audio_playing_glow": "#F59E0B",
+    "border_solid": "2px solid #D6D1C4"
+  },
+  "accessibility_rules": {
+    "min_touch_target_px": "48px (preferably 54px for primary voice buttons)",
+    "contrast_target": "WCAG AAA 7:1 for main body text, 4.5:1 minimum for secondary labels",
+    "focus_ring": "ring-4 ring-offset-2 ring-amber-500 focus:outline-none",
+    "tts_read_aloud_protocol": "Every AI response box MUST have a prominent, 1-click 'Səsləndir' (Listen / Play) button with speed toggle (0.8x, 1.0x, 1.2x) and sentence-level animated reading highlight",
+    "voice_input_protocol": "Large, vibrating mic button with clear 'Dinləyirəm...' (Listening...) pulse state, visual soundwave indicator, and instant fallback speech recognition + manual text box",
+    "language_toggle": "Instant 1-click switch between 'Azərbaycan dili' and 'Türkçe' with localized UI text, voice prompts, and middle-school terminology",
+    "pdf_scan_experience": "Drag-and-drop or file upload for PDF books and chapter scans, with instant chapter detection, audio summary generation, and key questions"
+  },
+  "key_components": [
+    {
+      "name": "AccessiblityTopBar",
+      "path": "frontend/src/components/AccessiblityTopBar.js",
+      "description": "Sticky accessible header with quick font size stepper (A-, A+), high-contrast theme picker (Parchment, Amber Night, Yellow/Black), Language switcher (AZ / TR), and Audio Speed control."
+    },
+    {
+      "name": "TutorHeroCompanion",
+      "path": "frontend/src/components/TutorHeroCompanion.js",
+      "description": "Welcoming, warm AI companion widget ('Ağıllı Müəllim' / 'Dost Canlısı Müəllim') with speaking animated avatar, live status, and one-touch big audio prompt."
+    },
+    {
+      "name": "InteractiveVoiceChat",
+      "path": "frontend/src/components/InteractiveVoiceChat.js",
+      "description": "Central conversation space with oversized message bubbles, high-contrast text, word-by-word or sentence read-aloud TTS buttons, repeat button, and massive microphone input with soundwave feedback."
+    },
+    {
+      "name": "BookScannerLibrary",
+      "path": "frontend/src/components/BookScannerLibrary.js",
+      "description": "PDF Book upload/scanner section with pre-loaded middle-school curriculum books (Biologiya 6-cı sinif, Təbiət elmləri, Riyaziyyat, Tarix), chapter selector, and 1-click 'İzah Et və Oxu' (Explain & Read Aloud) feature."
+    },
+    {
+      "name": "TopicSimplifierCard",
+      "path": "frontend/src/components/TopicSimplifierCard.js",
+      "description": "Simplifies difficult school concepts into 3 bullet points with analogies suited for an 11-14 year old, plus interactive quiz with big buttons and celebratory audio feedback."
+    },
+    {
+      "name": "MagnifierReadingSheet",
+      "path": "frontend/src/components/MagnifierReadingSheet.js",
+      "description": "Dedicated distraction-free reading mode with huge text (up to 36px), sentence highlighter, play/pause TTS scrubber, and ruler/focus strip for weak eyesight."
+    }
+  ],
+  "image_urls": [
+    {
+      "category": "hero_companion",
+      "url": "https://images.unsplash.com/photo-1599689868384-59cb2b01bb21?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MTN8MHwxfHNlYXJjaHwxfHxjaGlsZCUyMHJlYWRpbmclMjBib29rJTIwbWFnbmlmeWluZyUyMGdsYXNzfGVufDB8fHx8MTc5MDUxMTgwOHww&ixlib=rb-4.1.0&q=85",
+      "alt": "A young curious student reading comfortably at a warm wooden desk",
+      "usage": "Use in Hero section or Book Scanner onboarding to represent patient, focused learning without visual strain."
+    },
+    {
+      "category": "library_science_topic",
+      "url": "https://images.unsplash.com/photo-1758685734201-72662f1a368d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHwyfHxzY2hvb2wlMjBzY2llbmNlJTIwZnJpZW5kbHklMjBpbGx1c3RyYXRpb258ZW58MHx8fHwxNzkwNTExODA5fDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Friendly mentor explaining science concept to student in classroom",
+      "usage": "Use as thumbnail for Science / Nature topic (Biologiya & Təbiət) in the sample curriculum library."
+    },
+    {
+      "category": "magnifier_reading_view",
+      "url": "https://images.unsplash.com/photo-1632096936824-565d39f8e5eb?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MTN8MHwxfHNlYXJjaHw0fHxjaGlsZCUyMHJlYWRpbmclMjBib29rJTIwbWFnbmlmeWluZyUyMGdsYXNzfGVufDB8fHx8MTc5MDUxMTgwOHww&ixlib=rb-4.1.0&q=85",
+      "alt": "Book open with magnifying glass showing crystal clear focus",
+      "usage": "Use in the PDF Scanner & Magnifier feature showcase card."
+    }
+  ],
+  "mock_and_integration_notes": {
+    "tts_engine": "Native Web SpeechSynthesis API with natural fallbacks (az-AZ, tr-TR, and en fallback), plus realistic animated audio wave bars and live sentence tracker.",
+    "stt_engine": "Web SpeechRecognition (webkitSpeechRecognition) with instant mic feedback, plus simulated pre-built voice queries in Azerbaijani and Turkish.",
+    "pdf_analysis": "Client-side PDF text extraction and mock middle-school curricula parser (with 4 pre-loaded textbooks: Hüceyrə və Canlılar / Canlıların Dünyası, Günəş Sistemi, Kəsrlər və Faizlər, Qədim Şumer Mədəniyyəti) and dynamic file upload handler for custom PDFs."
+  },
+  "instructions_to_main_agent": [
+    "Import Lexend and Outfit Google fonts in index.css so typography is optimized for dyslexia and low-vision readers.",
+    "Ensure every single interactive element has a data-testid attribute in kebab-case format.",
+    "Do NOT use small 12px or 14px text anywhere. Minimum font size in standard mode is 18px-20px.",
+    "Buttons must have a minimum height of 48px to 56px with clear 2px to 3px solid borders, thick rounded corners (rounded-2xl), and distinct focus states.",
+    "Include both Azerbaijani (Azərbaycan dili) and Turkish (Türkçe) language dictionaries with a 1-click toggle on top.",
+    "Provide a realistic, working text-to-speech player with Play, Pause, Speed toggle (0.8x, 1x, 1.2x), and volume control.",
+    "Provide an interactive microphone button that captures voice (or falls back gracefully with sample prompts) and submits questions to the AI tutor.",
+    "Ensure the PDF upload allows dropping or choosing real PDF files, parses or provides instant accessible breakdown cards with voice read-aloud.",
+    "Add a high-contrast mode switcher (Warm Parchment, Amber Night, Yellow/Black high contrast) that instantly transforms the entire UI.",
+    "Ensure sonner is integrated for accessible alerts, and no unstyled browser alerts are used."
+  ],
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": {
+    "anti_ai_slop": "DO NOT use dark purple gradients with small white text. Use rich warm parchment (#FAF7F0) or deep obsidian (#0C0A09) with warm amber and deep teal.",
+    "optical_clarity": "Borders should be solid and distinct (1.5px to 2.5px), never barely visible faint hairline borders.",
+    "child_tone": "Warm, encouraging, enthusiastic, supportive. Middle school appropriate explanations (no dry university jargon, use vivid real-world analogies like comparing a cell nucleus to a school principal or phone CPU)."
+  }
+}
