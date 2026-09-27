@@ -108,7 +108,7 @@ def session_key(book_id=None, subject=None, topic=None):
     if book_id:
         return f"book-{book_id}"
     if subject and topic:
-        return "lesson-" + hashlib.md5(f"{subject}|{topic}".encode()).hexdigest()[:12]
+        return "lesson-" + hashlib.sha256(f"{subject}|{topic}".encode()).hexdigest()[:12]
     return "general"
 
 
@@ -380,11 +380,14 @@ async def tts(req: TTSRequest):
                             headers={"Cache-Control": "public, max-age=31536000"})
         except Exception:
             pass
+    audio = None
     try:
         engine = OpenAITextToSpeech(api_key=EMERGENT_KEY)
         audio = await engine.generate_speech(text=text, model="tts-1", voice="coral", speed=speed)
     except Exception as e:
         logger.error(f"TTS failed: {e}")
+        raise HTTPException(500, "Səs yaradıla bilmədi")
+    if not audio:
         raise HTTPException(500, "Səs yaradıla bilmədi")
     spath = f"{APP_NAME}/tts/{key}.mp3"
     try:

@@ -59,7 +59,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
             setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: full } : x)));
             scrollDown();
           }
-        } catch {}
+        } catch (err) { console.warn("SSE parse skipped", err); }
       }
     }
     return full;
@@ -102,7 +102,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
       try {
         const res = await fetch(`${API}/messages?${qs()}`);
         hist = await res.json();
-      } catch {}
+      } catch (err) { console.error("Failed to load messages", err); }
       if (hist.length > 0) { setMessages(hist); scrollDown(); return; }
       if (book) {
         setMessages([{ role: "assistant", content: book.explanation, id: "intro" }]);
@@ -231,7 +231,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
       {/* Quick asks */}
       <div className="flex flex-wrap gap-2 my-3">
         {quicks.map((q, i) => (
-          <button key={i} data-testid={`quick-ask-${i}`} disabled={streaming} onClick={() => send(q)}
+          <button key={q} data-testid={`quick-ask-${i}`} disabled={streaming} onClick={() => send(q)}
             className="inline-flex items-center gap-2 h-11 px-4 rounded-full bg-surface border-solid-2 font-semibold text-base hover:bg-surface-2 transition-colors disabled:opacity-50">
             <Sparkles size={18} className="text-accent" /> {q}
           </button>

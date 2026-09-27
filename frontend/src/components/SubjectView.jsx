@@ -22,7 +22,7 @@ export const SubjectView = ({ t, subject, onBack, onLesson }) => {
       <h2 className="font-heading font-bold text-2xl mb-6">{t.chooseLesson}</h2>
       <div className="grid sm:grid-cols-2 gap-4">
         {subject.topics.map((topic, i) => (
-          <button key={i} data-testid={`lesson-card-${i}`} onClick={() => onLesson(topic)}
+          <button key={topic} data-testid={`lesson-card-${i}`} onClick={() => onLesson(topic)}
             className="rise text-left p-5 rounded-3xl bg-surface border-solid-2 hover:-translate-y-1 transition-transform flex items-center gap-4"
             style={{ animationDelay: `${i * 50}ms` }}>
             <div className="w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 font-heading font-extrabold text-2xl"

@@ -24,7 +24,10 @@ export const ParentPanel = ({ t, subjects, onBack }) => {
       try {
         const r = await fetch(`${API}/progress`);
         setData(await r.json());
-      } catch {} finally { setLoading(false); }
+      } catch (err) {
+        console.error("Failed to load progress", err);
+        setData({ total_questions: 0, subjects_studied: 0, lessons_started: 0, by_subject: [] });
+      } finally { setLoading(false); }
     })();
   }, []);
 
@@ -63,7 +66,7 @@ export const ParentPanel = ({ t, subjects, onBack }) => {
                 const Icon = Icons[m.icon] || BookOpen;
                 const color = m.color || "var(--accent)";
                 return (
-                  <div key={i} data-testid={`parent-subject-${i}`} className="rise rounded-3xl bg-surface border-solid-2 overflow-hidden" style={{ animationDelay: `${i * 50}ms` }}>
+                  <div key={s.subject} data-testid={`parent-subject-${i}`} className="rise rounded-3xl bg-surface border-solid-2 overflow-hidden" style={{ animationDelay: `${i * 50}ms` }}>
                     <div className="flex items-center gap-4 p-5 bg-surface-2">
                       <div className="w-14 h-14 rounded-2xl flex items-center justify-center shrink-0" style={{ background: color, color: "#fff" }}><Icon size={28} /></div>
                       <div className="flex-1 min-w-0">
@@ -72,8 +75,8 @@ export const ParentPanel = ({ t, subjects, onBack }) => {
                       </div>
                     </div>
                     <div>
-                      {s.lessons.map((l, j) => (
-                        <div key={j} className="flex items-center gap-3 px-5 py-4 border-t" style={{ borderColor: "var(--border)" }}>
+                      {s.lessons.map((l) => (
+                        <div key={l.topic} className="flex items-center gap-3 px-5 py-4 border-t" style={{ borderColor: "var(--border)" }}>
                           <span className="font-heading font-bold text-lg flex-1 min-w-0 truncate">{l.topic}</span>
                           {l.explained && (
                             <span className="inline-flex items-center gap-1 text-base font-semibold text-accent shrink-0"><CheckCircle2 size={18} /> {t.explainedBadge}</span>
