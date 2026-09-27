@@ -7,8 +7,10 @@ export function useTTS(lang, speed) {
   const [speakingId, setSpeakingId] = useState(null);
   const [loading, setLoading] = useState(false);
   const audioRef = useRef(null);
+  const tokenRef = useRef(0);
 
   const stop = useCallback(() => {
+    tokenRef.current += 1;
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current = null;
@@ -21,6 +23,7 @@ export function useTTS(lang, speed) {
   const speak = useCallback(async (text, id) => {
     stop();
     if (!text) return;
+    const myToken = tokenRef.current;
     setSpeakingId(id);
     setLoading(true);
     try {
@@ -31,15 +34,21 @@ export function useTTS(lang, speed) {
       });
       if (!res.ok) throw new Error("tts failed");
       const blob = await res.blob();
+      if (myToken !== tokenRef.current) return;
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       audioRef.current = audio;
-      audio.onended = () => { setSpeakingId(null); URL.revokeObjectURL(url); };
+      audio.onended = () => {
+        if (audioRef.current === audio) { audioRef.current = null; setSpeakingId(null); }
+        URL.revokeObjectURL(url);
+      };
       audio.onplay = () => setLoading(false);
       await audio.play();
     } catch (e) {
+      if (myToken !== tokenRef.current) return;
       // Fallback to browser speech synthesis
       try {
+        window.speechSynthesis.cancel();
         const u = new SpeechSynthesisUtterance(text);
         u.lang = lang === "az" ? "az-AZ" : "tr-TR";
         u.rate = speed;

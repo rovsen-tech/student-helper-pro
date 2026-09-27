@@ -95,7 +95,11 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
     await runAssistant({ subject, topic, lang, stage: "quiz_next" });
   };
 
+  const initRef = useRef(null);
   useEffect(() => {
+    const key = `${book?.id || ""}|${subject || ""}|${topic || ""}`;
+    if (initRef.current === key) return;
+    initRef.current = key;
     const load = async () => {
       if (subject && topic) { streamExplain(); return; }
       let hist = [];
