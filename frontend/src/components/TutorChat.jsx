@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { ArrowLeft, Send, Mic, Volume2, Square, Loader2, GraduationCap, Sparkles } from "lucide-react";
+import { ArrowLeft, Send, Mic, Volume2, Square, Loader2, GraduationCap, Sparkles, PencilLine, ListChecks } from "lucide-react";
 import { toast } from "sonner";
 import { useTTS } from "../hooks/useTTS";
 
@@ -23,9 +23,11 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [listening, setListening] = useState(false);
+  const [stage, setStage] = useState(null);
   const { speak, stop, speakingId, loading } = useTTS(lang, speed);
   const scrollRef = useRef(null);
   const recRef = useRef(null);
+  const inputRef = useRef(null);
   const autoSpokeRef = useRef(false);
 
   const scrollDown = () => setTimeout(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }), 50);
@@ -63,16 +65,16 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
     return full;
   };
 
-  const streamExplain = async () => {
-    const aiId = "explain";
-    setMessages([{ role: "assistant", content: "", id: aiId }]);
+  const runAssistant = async (body, seedId) => {
+    const aiId = seedId || `a${Date.now()}`;
+    setMessages((m) => (seedId ? [{ role: "assistant", content: "", id: aiId }] : [...m, { role: "assistant", content: "", id: aiId }]));
     setStreaming(true);
     scrollDown();
     try {
       const res = await fetch(`${API}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subject, topic, lang, explain: true }),
+        body: JSON.stringify(body),
       });
       const full = await readStream(res, aiId);
       if (full) speak(full, aiId);
@@ -81,8 +83,21 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
     } finally { setStreaming(false); scrollDown(); }
   };
 
+  const streamExplain = async () => {
+    await runAssistant({ subject, topic, lang, explain: true }, "explain");
+    setStage("explained");
+  };
+
+  const startRecall = () => { setStage("recall_input"); inputRef.current?.focus(); };
+
+  const startQuiz = async () => {
+    setStage("quiz");
+    await runAssistant({ subject, topic, lang, stage: "quiz_next" });
+  };
+
   useEffect(() => {
     const load = async () => {
+      if (subject && topic) { streamExplain(); return; }
       let hist = [];
       try {
         const res = await fetch(`${API}/messages?${qs()}`);
@@ -92,8 +107,6 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
       if (book) {
         setMessages([{ role: "assistant", content: book.explanation, id: "intro" }]);
         scrollDown();
-      } else if (subject && topic) {
-        streamExplain();
       } else {
         setMessages([{ role: "assistant", content: t.welcome, id: "intro" }]);
         scrollDown();
@@ -108,6 +121,9 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
     if (!msg || streaming) return;
     stop();
     setInput("");
+    const effStage = subject && topic
+      ? (stage === "recall_input" ? "recall" : stage === "quiz" ? "quiz_answer" : undefined)
+      : undefined;
     const userMsg = { role: "user", content: msg, id: `u${Date.now()}` };
     const aiId = `a${Date.now()}`;
     setMessages((m) => [...m, userMsg, { role: "assistant", content: "", id: aiId }]);
@@ -117,17 +133,18 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
       const res = await fetch(`${API}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ book_id: book?.id || null, subject, topic, message: msg, lang }),
+        body: JSON.stringify({ book_id: book?.id || null, subject, topic, message: msg, lang, stage: effStage }),
       });
       const full = await readStream(res, aiId);
       if (full) speak(full, aiId);
+      if (effStage === "recall") setStage("recalled");
     } catch {
       toast.error("Xəta");
     } finally {
       setStreaming(false);
       scrollDown();
     }
-  }, [input, streaming, book, subject, topic, lang, speak, stop]);
+  }, [input, streaming, book, subject, topic, lang, stage, speak, stop]);
 
   const startMic = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -186,6 +203,31 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
         ))}
       </div>
 
+      {/* Stage controls (lessons only) */}
+      {subject && topic && stage && (
+        <div data-testid="stage-indicator" className="flex flex-wrap items-center gap-2 text-base font-semibold mt-3">
+          <span className={`px-3 py-1 rounded-full ${stage === "explained" ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>1. {t.stageExplain}</span>
+          <span className={`px-3 py-1 rounded-full ${(stage === "recall_input" || stage === "recalled") ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>2. {t.stageRecall}</span>
+          <span className={`px-3 py-1 rounded-full ${stage === "quiz" ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>3. {t.stageQuiz}</span>
+        </div>
+      )}
+      {subject && topic && !streaming && (stage === "explained" || stage === "recalled") && (
+        <div className="mt-3">
+          {stage === "explained" && (
+            <button data-testid="step-recall-btn" onClick={startRecall}
+              className="w-full h-14 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:opacity-90 transition-opacity">
+              <PencilLine size={24} /> {t.stepRecall}
+            </button>
+          )}
+          {stage === "recalled" && (
+            <button data-testid="step-quiz-btn" onClick={startQuiz}
+              className="w-full h-14 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:opacity-90 transition-opacity">
+              <ListChecks size={24} /> {t.stepQuiz}
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Quick asks */}
       <div className="flex flex-wrap gap-2 my-3">
         {quicks.map((q, i) => (
@@ -204,10 +246,10 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
           {listening ? <Waveform /> : <Mic size={30} />}
         </button>
         <div className="flex-1 flex items-end gap-2 bg-surface border-solid-2 rounded-3xl p-2">
-          <textarea data-testid="chat-input" value={input} rows={1}
+          <textarea ref={inputRef} data-testid="chat-input" value={input} rows={1}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-            placeholder={listening ? t.listening : t.askPlaceholder}
+            placeholder={listening ? t.listening : (stage === "recall_input" ? t.recallHint : stage === "quiz" ? t.quizHint : t.askPlaceholder)}
             className="flex-1 bg-transparent outline-none resize-none text-xl px-3 py-3 max-h-40" />
           <button data-testid="send-btn" onClick={() => send()} disabled={streaming || !input.trim()}
             className="w-14 h-14 rounded-2xl bg-accent flex items-center justify-center shrink-0 disabled:opacity-40 hover:opacity-90 transition-opacity" style={{ color: "#fff" }}>

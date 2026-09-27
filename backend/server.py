@@ -101,6 +101,7 @@ class ChatRequest(BaseModel):
     message: str = ""
     lang: str = "az"
     explain: bool = False
+    stage: Optional[str] = None
 
 
 def session_key(book_id=None, subject=None, topic=None):
@@ -109,6 +110,16 @@ def session_key(book_id=None, subject=None, topic=None):
     if subject and topic:
         return "lesson-" + hashlib.md5(f"{subject}|{topic}".encode()).hexdigest()[:12]
     return "general"
+
+
+async def record_activity(subject, topic, is_question):
+    now = datetime.now(timezone.utc).isoformat()
+    update = {"$set": {"last_active": now}, "$setOnInsert": {"started_at": now}}
+    if is_question:
+        update["$inc"] = {"question_count": 1}
+    else:
+        update["$set"]["explained"] = True
+    await db.progress.update_one({"subject": subject, "topic": topic}, update, upsert=True)
 
 
 class TTSRequest(BaseModel):
@@ -125,7 +136,10 @@ def tutor_system_message(lang: str, book=None, subject=None, topic=None) -> str:
         f"10-11 yaşlı 5-ci sinif şagirdi ilə danışırsan. Şagirdin gözləri zəifdir, ona görə "
         f"cavabların qısa, aydın və sadə olsun. HƏMİŞƏ {lang_name} cavab ver. "
         f"Çətin anlayışları gündəlik həyatdan sadə bənzətmələrlə izah et. Qısa cümlələr işlət, "
-        f"emoji istifadə etmə. Cavabın sonunda şagirdi ruhlandır və sual verməyə həvəsləndir."
+        f"emoji istifadə etmə. Cavabın sonunda şagirdi ruhlandır. "
+        f"Dərs metodun belədir: əvvəl mövzunu sadə izah et, sonra şagirdə öz sözləri ilə danışdır və "
+        f"səhvlərini mehribanca düzəlt, sonra bir-bir suallar ver; şagird bilməyəndə mövzunu daha da "
+        f"sadə şəkildə yenidən izah et. Həmişə mehriban və səbirli ol."
     )
     if subject:
         base += f"\n\nHazırkı fənn: {subject}."
@@ -244,8 +258,33 @@ async def chat_stream(req: ChatRequest):
     chat = make_chat(session_id, sysmsg)
 
     if req.explain:
+        await db.messages.delete_many({"session_id": session_id})
         user_text = (f"«{req.topic}» mövzusunu 5-ci sinif şagirdinə uyğun, maraqlı və sadə "
-                     f"şəkildə, gündəlik nümunələrlə izah et. Qısa və aydın saxla.")
+                     f"şəkildə, gündəlik nümunələrlə izah et. Qısa və aydın saxla. "
+                     f"Sonda şagirdə de ki, indi növbə onundur və bu mövzunu öz sözləri ilə danışmalıdır.")
+    elif req.stage == "recall":
+        if req.message:
+            await db.messages.insert_one({
+                "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
+                "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        user_text = (f"Şagird «{req.topic}» mövzusunu öz sözləri ilə belə izah etdi:\n«{req.message}»\n"
+                     f"Doğru və yaxşı hissələri qısaca tərif et, varsa səhvləri çox mehribanca düzəlt və "
+                     f"düzgün formasını de. Sonra ona de: «Əla! İndi sənə bu mövzudan bir neçə sual verəcəm, hazırsan?»")
+    elif req.stage == "quiz_next":
+        user_text = (f"Şagirdə «{req.topic}» mövzusundan BİR qısa və sadə sual ver. "
+                     f"Əvvəl verdiyin sualları təkrar etmə. Yalnız sualı yaz, cavabı yazma.")
+    elif req.stage == "quiz_answer":
+        if req.message:
+            await db.messages.insert_one({
+                "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
+                "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        user_text = (f"Bu, verdiyin sonuncu suala şagirdin cavabıdır:\n«{req.message}»\n"
+                     f"Əgər cavab doğrudursa, onu təriflə və dərhal növbəti qısa sualı ver. "
+                     f"Əgər cavab səhvdirsə və ya şagird bilmədiyini deyirsə, həmin mövzunu müəllimdən daha "
+                     f"yaxşı, daha sadə şəkildə, gündəlik nümunə ilə yenidən izah et, sonra asan bir sual ver. "
+                     f"Təxminən 3 sualdan sonra dərsi ürəkləndirici sözlərlə bitir.")
     else:
         user_text = req.message
         await db.messages.insert_one({
@@ -255,9 +294,17 @@ async def chat_stream(req: ChatRequest):
 
     context = ""
     if history and not req.explain:
-        recent = history[-6:]
+        recent = history[-8:]
         context = "Əvvəlki söhbət:\n" + "\n".join(
-            f"{'Şagird' if m['role']=='user' else 'Müəllim'}: {m['content']}" for m in recent) + "\n\nİndiki sual: "
+            f"{'Şagird' if m['role']=='user' else 'Müəllim'}: {m['content']}" for m in recent) + "\n\nTapşırıq: "
+
+    if req.subject and req.topic:
+        a_subject, a_topic = req.subject, req.topic
+    elif book:
+        a_subject, a_topic = "Yüklənən kitablar", book.get("title", "Kitab")
+    else:
+        a_subject, a_topic = "Ümumi söhbət", "Suallar"
+    await record_activity(a_subject, a_topic, (not req.explain) and bool(req.message))
 
     async def gen():
         full = ""
@@ -286,6 +333,29 @@ async def get_messages(book_id: str = None, subject: str = None, topic: str = No
     session_id = session_key(book_id, subject, topic)
     docs = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(200)
     return [{"role": d["role"], "content": d["content"], "id": d["id"]} for d in docs]
+
+
+@api_router.get("/progress")
+async def get_progress():
+    docs = await db.progress.find({}).sort("last_active", -1).to_list(1000)
+    by_subject = {}
+    total_q = 0
+    for d in docs:
+        s = d["subject"]
+        by_subject.setdefault(s, {"subject": s, "lessons": [], "total_questions": 0, "last_active": d.get("last_active")})
+        by_subject[s]["lessons"].append({
+            "topic": d["topic"], "question_count": d.get("question_count", 0),
+            "explained": d.get("explained", False), "last_active": d.get("last_active"),
+        })
+        by_subject[s]["total_questions"] += d.get("question_count", 0)
+        total_q += d.get("question_count", 0)
+    return {
+        "total_questions": total_q,
+        "subjects_studied": len(by_subject),
+        "lessons_started": len(docs),
+        "last_active": docs[0].get("last_active") if docs else None,
+        "by_subject": list(by_subject.values()),
+    }
 
 
 def clean_for_tts(text: str) -> str:

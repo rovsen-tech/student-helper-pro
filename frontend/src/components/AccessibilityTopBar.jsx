@@ -1,4 +1,4 @@
-import { Minus, Plus, Sun, Moon, Contrast, Volume2, GraduationCap } from "lucide-react";
+import { Minus, Plus, Sun, Moon, Contrast, Volume2, GraduationCap, BarChart3 } from "lucide-react";
 
 const THEMES = [
   { id: "light", icon: Sun, key: "themeLight" },
@@ -7,7 +7,7 @@ const THEMES = [
 ];
 const SPEEDS = [0.8, 1.0, 1.2];
 
-export const AccessibilityTopBar = ({ t, lang, setLang, theme, setTheme, fontStep, setFontStep, speed, setSpeed }) => {
+export const AccessibilityTopBar = ({ t, lang, setLang, theme, setTheme, fontStep, setFontStep, speed, setSpeed, onOpenParent }) => {
   return (
     <header
       data-testid="accessibility-topbar"
@@ -69,6 +69,12 @@ export const AccessibilityTopBar = ({ t, lang, setLang, theme, setTheme, fontSte
               </button>
             ))}
           </div>
+
+          {/* Parent panel */}
+          <button data-testid="parent-panel-btn" onClick={onOpenParent} title={t.parent}
+            className="h-[52px] px-4 rounded-2xl bg-surface-2 border-solid-2 flex items-center gap-2 font-bold text-base hover:bg-accent hover:text-white transition-colors">
+            <BarChart3 size={22} /> <span className="hidden sm:inline">{t.parent}</span>
+          </button>
         </div>
       </div>
     </header>

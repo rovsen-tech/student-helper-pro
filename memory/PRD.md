@@ -34,6 +34,15 @@ Parent's child has weak eyesight and cannot read lessons. Build an AI system tha
 - Session keys: book-{id} / lesson-{md5(subject|topic)} / general; history persisted
 - Verified: backend 10/10, frontend all flows
 
+## Implemented (2026-06 — iteration 4: guided learning loop)
+- 4-step lesson loop for EVERY lesson (backend stage-aware /api/chat + frontend stage machine):
+  1. İzah: system summarizes & teaches the topic simply (auto TTS)
+  2. Sən danış: child retells in own words → system praises & gently corrects mistakes
+  3. Suallar: system asks voice questions one by one
+  4. If child is wrong/"bilmirəm", system re-teaches simpler then re-asks; ends after ~3 Qs
+- Stage indicator + big step buttons ("Mövzunu mən danışıram", "Suallara başla")
+- Voice answers supported at every step; lesson resets fresh on each open
+
 ## Backlog
 - P1: Interactive quizzes with celebratory audio feedback (TopicSimplifierCard)
 - P1: Distraction-free magnifier reading mode with sentence highlighting

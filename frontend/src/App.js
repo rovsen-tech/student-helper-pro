@@ -6,6 +6,7 @@ import { DICT } from "@/i18n";
 import { AccessibilityTopBar } from "@/components/AccessibilityTopBar";
 import { Home } from "@/components/Home";
 import { SubjectView } from "@/components/SubjectView";
+import { ParentPanel } from "@/components/ParentPanel";
 import { TutorChat } from "@/components/TutorChat";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -40,7 +41,7 @@ function App() {
 
   return (
     <div className="App">
-      <AccessibilityTopBar {...{ t, lang, setLang, theme, setTheme, fontStep, setFontStep, speed, setSpeed }} />
+      <AccessibilityTopBar {...{ t, lang, setLang, theme, setTheme, fontStep, setFontStep, speed, setSpeed, onOpenParent: () => setView({ type: "parent" }) }} />
       {view.type === "home" && (
         <Home t={t} lang={lang} subjects={subjects} books={books}
           onSubject={(s) => setView({ type: "subject", subject: s })}
@@ -55,6 +56,9 @@ function App() {
       {view.type === "chat" && (
         <TutorChat t={t} lang={lang} ctx={view.ctx} speed={speed}
           onBack={() => setView(view.from || { type: "home" })} />
+      )}
+      {view.type === "parent" && (
+        <ParentPanel t={t} subjects={subjects} onBack={() => setView({ type: "home" })} />
       )}
       <Toaster position="top-center" richColors />
     </div>
