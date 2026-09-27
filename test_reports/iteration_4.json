@@ -1,0 +1,23 @@
+{
+  "summary": "Verified duplicate-TTS bug fix on Ağıllı Dərs. Instrumented Playwright to intercept all /api/tts and /api/chat requests while opening a fresh lesson (subject-card-informatika -> lesson-card-0). Auto-explanation produced EXACTLY 1 /api/tts call and 1 /api/chat call (previously 2 due to React.StrictMode). Regression flow (recall answer send, step-quiz start) also produced exactly 1 TTS + 1 chat per assistant message. Listen button toggle behaves correctly: because auto-explain sets speakingId on the assistant message, the first listen-btn click acts as stop (0 TTS), second click plays (1 TTS), third click stops (0 TTS) with no overlap. AZ home renders, chat-back-btn works, parent-panel-btn visible.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "useTTS.js: token guard correctly implemented — stop() bumps tokenRef; speak() aborts after fetch/blob when tokenRef changed. onended nulls audioRef only when it still owns the element. Good.",
+    "TutorChat.jsx: initRef keyed by book|subject|topic prevents StrictMode double-invocation of streamExplain(). Good. Minor: eslint-disable next-line at end of useEffect deps — acceptable given the intent to run only on lesson change.",
+    "Minor: initRef is a plain useRef and persists across component instance lifetime; if user re-opens same lesson after leaving TutorChat and returning, a new TutorChat instance is created so key check works — no issue."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (frontend-only)", "frontend": "100%"},
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Duplicate-TTS bug confirmed fixed. Measurement approach: page.on('request') filter /api/tts, clear list right BEFORE clicking lesson-card-0, wait for step-recall-btn plus 3-4s buffer to catch any delayed StrictMode duplicate. When testing listen-btn interactions, remember that the auto-explain speak() call sets speakingId on the assistant message, so the first click on listen-btn-<id> acts as stop().",
+  "rca of the issue": "React.StrictMode double-invoked the load useEffect in TutorChat, so streamExplain() ran twice, each completion calling speak(full, aiId) — resulting in 2 overlapping /api/tts fetches and 2 <audio> plays. Fix: (1) initRef guard keyed by book|subject|topic short-circuits the second invocation; (2) tokenRef guard in useTTS ensures only the latest speak() request creates/plays the audio element (any superseded request returns after fetch)."
+}
