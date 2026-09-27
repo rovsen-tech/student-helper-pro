@@ -1,0 +1,23 @@
+{
+  "summary": "First-finish smoke pass for Ağıllı Müəllim MVP. Backend endpoints (books, chat SSE, tts, messages) and frontend flow (library -> book chat -> streamed answer, language toggle AZ/TR, theme + font accessibility controls) all verified via public URL. PDF upload not exercised (slow, ~60s, low-risk for first finish).",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "passed": [
+    "GET /api/books returns 4 seeded Azerbaijani books with id/title/subject/key_topics/explanation (200)",
+    "POST /api/chat streams SSE 'data: {delta}' chunks in Azerbaijani and terminates with {done:true}",
+    "POST /api/tts returns audio/mpeg (12.6KB, MP3 magic 0xFFF3) for Azerbaijani text (200)",
+    "GET /api/messages/general returns saved user+assistant history after chat",
+    "Frontend loads at REACT_APP_BACKEND_URL, hero + 4 book-card-{0..3} + general-chat-card + upload-input rendered",
+    "AccessibilityTopBar: lang-az-btn / lang-tr-btn switches UI language (TR renders 'Akıllı Öğretmen', 'Merhaba')",
+    "theme-amber-btn switches theme; font-increase-btn changes font size",
+    "Clicking book-card-0 opens TutorChat with book explanation and a Səsləndir (listen-btn) button visible",
+    "chat-input + send-btn dispatches user message; quick-ask-0..2 chips present; chat-back-btn present"
+  ],
+  "failed": [],
+  "action_items": [
+    "Optional: full-testing agent should exercise POST /api/books/upload with a real small PDF (skipped here due to ~60s latency) and verify newly-uploaded book appears in GET /api/books",
+    "Optional: verify listen-btn actually plays audio in browser (audio playback not asserted; TTS endpoint itself is confirmed working)"
+  ],
+  "success_rate": {"backend": "100% (4/4 tested endpoints)", "frontend": "100% (all primary flows)"},
+  "retest_needed": false,
+  "full_testing_deferred": true
+}
