@@ -45,7 +45,7 @@ export const Home = ({ t, lang, subjects, books, onSubject, onChat, onUploaded }
 
       {/* Subjects */}
       <h2 className="font-heading font-bold text-3xl mb-6 flex items-center gap-3">
-        <BookOpen size={30} className="text-accent" /> {t.subjects}
+        <BookOpen size={30} className="text-accent" /> {t.subjectsHeading}
       </h2>
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5 mb-14">
         {subjects.map((s, i) => {

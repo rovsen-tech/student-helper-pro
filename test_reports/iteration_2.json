@@ -1,0 +1,27 @@
+{
+  "summary": "Iteration 2 (subject/curriculum restructure) tested end-to-end. Backend: 10/10 pytest cases pass — /api/subjects returns exactly 10 subjects with correct ids/topics (incl. Riyaziyyat > 'Adi kəsrlər'); /api/chat SSE streams for lesson-explain, lesson follow-up and general modes and persists history retrievable via /api/messages?subject=&topic=; /api/tts returns audio/mpeg; /api/books list works and unknown book -> 404. Frontend: brand 'Ağıllı Dərs' + subtitle 'Azərbaycan 5-ci sinif milli kurikulumu' visible, 10 subject-card-* rendered, Riyaziyyat opens SubjectView with 7 lesson-card-* + subject-back-btn, lesson-card-0 auto-streams explanation, listen-btn appears, chat header shows topic ('Natural ədədlər') + subject, chat-input+send-btn streams a contextual answer, chat-back-btn returns, AZ/TR toggle updates chrome, font A+ and theme-amber-btn work.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "i18n.js", "issue": "Key 'subjects' is duplicated in both az and tr dicts — the second definition ('Fənn' / 'Ders', singular label for a book badge) overrides the intended plural heading ('Fənlər' / 'Dersler'), so the subjects section heading on Home renders as 'Ders' / 'Fənn' instead of 'Dersler' / 'Fənlər'.", "selector": "Home h2 next to BookOpen icon", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_backend.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Rename duplicated i18n key: use `subjectsHeading: 'Fənlər' / 'Dersler'` for the Home section heading (Home.jsx line 48) and keep `subjects: 'Fənn' / 'Ders'` for the book badge label — or just rename one of them to avoid the JS object-literal key collision."
+  ],
+  "critical_code_review_comments": [
+    "i18n.js has a duplicated object key 'subjects' in both az and tr — ESLint would flag as no-dupe-keys.",
+    "In /api/chat, history is fetched with .to_list(20) then sliced to last 6 — fine but could push .limit(6).sort(-1) then reverse for efficiency (non-blocking).",
+    "backend/server.py MODEL_NAME='gemini-3.1-pro-preview' — verify this model id is valid on emergentintegrations; if invalid, chat would 500. Live tests confirmed streaming works, so it is valid today.",
+    "server.py startup deletes sample books every boot — intentional per spec ('no sample books seeded anymore'), OK."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend.py"],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% (all 12 flows verified)"},
+  "seed_data_creation": "None — chat persisted messages under session lesson-<md5('Riyaziyyat|Adi kəsrlər')> and lesson-<md5('Riyaziyyat|Natural ədədlər')> plus one 'general' session as a byproduct of tests; safe to leave.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base API = REACT_APP_BACKEND_URL + /api. Chat is SSE ('data: {json}'). Lesson sessions keyed by md5(subject|topic). Sample books are wiped on startup — /api/books returns []. PDF upload path exists but not exercised (slow LLM analysis, ~30-60s). Web Speech API mic unavailable headless — use typed input. Only known issue: duplicated 'subjects' key in i18n.js causing wrong plural heading on Home."
+}

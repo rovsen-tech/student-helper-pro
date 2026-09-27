@@ -25,6 +25,15 @@ Parent's child has weak eyesight and cannot read lessons. Build an AI system tha
 - Full accessibility top bar: font size, TTS speed, 3 themes, language toggle
 - All tested & passing (backend 4/4 endpoints, frontend all primary flows)
 
+## Implemented (2026-06 — iteration 2: branding + curriculum)
+- Rebranded to "Ağıllı Dərs" everywhere; professional home with hero + subtitle
+- Restructured for 5th grade (5-ci sinif). Tutor persona targets 10-11 yaş.
+- Azerbaijan 2024-2025 national curriculum: 10 subjects each with its own section and lesson topics (GET /api/subjects)
+- Navigation: Home (subjects grid) → SubjectView (lesson list) → TutorChat
+- Opening a lesson auto-streams an AI explanation of that topic + TTS
+- Session keys: book-{id} / lesson-{md5(subject|topic)} / general; history persisted
+- Verified: backend 10/10, frontend all flows
+
 ## Backlog
 - P1: Interactive quizzes with celebratory audio feedback (TopicSimplifierCard)
 - P1: Distraction-free magnifier reading mode with sentence highlighting
