@@ -1,0 +1,27 @@
+{
+  "summary": "Iteration 3 regression check after code-quality pass (MD5->SHA-256 session_key, TTS audio init hardening, catch-block logging, stable React keys). Backend: 12/12 pytest cases pass — /api/subjects (10 subjects), /api/chat SSE for explain/recall/quiz_next/quiz_answer with correct persistence, /api/messages returns lesson history under the NEW sha256-based session_key (chat & messages agree), /api/tts returns audio/mpeg (200) and 400 on empty, /api/progress aggregates total_questions/subjects_studied/lessons_started/by_subject, /api/books list + 404. Frontend Playwright: brand 'Ağıllı Dərs' + 'Fənlər' heading render, 10 subject cards, general-chat-card, upload-dropzone and parent-panel-btn present. Opening Riyaziyyat > Adi kəsrlər auto-streams the explanation, stage-indicator shows (1.İzah/2.Sən danış/3.Suallar), step-recall-btn appears, typing an answer via chat-input+send-btn is streamed and step-quiz-btn appears; clicking it starts the quiz. quick-ask-0..2 chips present, chat-back-btn returns. Parent Panel opens (parent-panel-btn), stat cards show correct values (Q=8, L=7, S=6 after test run) and per-subject list (parent-subject-* + lesson rows) renders — NO React duplicate-key warnings or console errors captured after the array-index->stable-id key change. AZ/TR toggle and font A-/A+ testids work.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_backend.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "session_key() correctly switched to hashlib.sha256(...).hexdigest()[:12] — chat writes and /api/messages reads use the same helper so lesson history is retrievable (verified end-to-end).",
+    "/api/tts: 'audio' is initialised to None before the try/except and re-checked afterwards; happy-path still returns audio/mpeg 200; a TTS-engine failure now yields a clean 500 'Səs yaradıla bilmədi' instead of a NameError.",
+    "TutorChat.readStream and message-load catches now log via console.warn/console.error (no more silently swallowed errors).",
+    "React list keys: SubjectView uses key={topic}, ParentPanel uses key={s.subject} and key={l.topic}, TutorChat quick-asks use key={q}. No duplicate-key warnings observed during full lesson+parent flow.",
+    "Minor (pre-existing, non-blocking): /api/chat still fetches history with .to_list(20) then slices last 8 — could push .sort(-1).limit(8) then reverse for efficiency.",
+    "Minor: theme/lang top-bar buttons do not expose data-testid for the individual theme buttons (only accessibility-topbar, font-decrease-btn, font-increase-btn, parent-panel-btn). If the review request lists 'theme buttons' as a testable target, adding data-testid=\"theme-{name}-btn\" and \"lang-{code}-btn\" would help future automation. Not a functional bug."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend.py"],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% (all requested regression flows verified)"},
+  "test_credentials": "N/A (no auth)",
+  "seed_data_creation": "Tests wrote lesson messages under sha256 session ids for Riyaziyyat > 'Adi kəsrlər' and 'Onluq kəsrlər', plus one 'general' session. Safe to leave; progress reflects them.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base API = REACT_APP_BACKEND_URL + /api. Chat is SSE ('data: {json}'). Lesson sessions now keyed by sha256(subject|topic)[:12]; MUST use the same helper on both write and read paths. Lesson stages: explain (resets history & streams), recall (persists user retell + streams correction), quiz_next (streams question, no user msg), quiz_answer (persists user answer + streams evaluation). /api/progress aggregates from db.progress upserts made in /api/chat. Sample books are wiped on startup. Web Speech mic unavailable headless — use typed input. Only cosmetic gap: theme/lang buttons lack per-button testids.",
+  "rca of the issue": "No issues found."
+}

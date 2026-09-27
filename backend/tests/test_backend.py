@@ -135,3 +135,65 @@ def test_books_list(sess):
 def test_get_book_not_found(sess):
     r = sess.get(f"{API}/books/nonexistent-id-xyz")
     assert r.status_code == 404
+
+
+# --- Iter3: lesson stage machine (recall, quiz_next, quiz_answer) + progress + sha256 session_key consistency ---
+def test_lesson_stage_machine_and_sha256_session(sess):
+    subject, topic = "Riyaziyyat", "Onluq kəsrlər"
+
+    # 1. explain - resets and streams
+    with sess.post(f"{API}/chat", json={"subject": subject, "topic": topic, "lang": "az", "explain": True}, stream=True, timeout=60) as r:
+        assert r.status_code == 200
+        full, done = _consume_sse(r)
+    assert done and len(full) > 20
+
+    # 2. recall
+    time.sleep(1)
+    with sess.post(f"{API}/chat", json={"subject": subject, "topic": topic, "lang": "az",
+                                        "stage": "recall", "message": "Onluq kəsrlər verguldan sonra gələn ədədlərdir."},
+                   stream=True, timeout=60) as r:
+        assert r.status_code == 200
+        full, done = _consume_sse(r)
+    assert done and len(full) > 10
+
+    # 3. quiz_next
+    time.sleep(1)
+    with sess.post(f"{API}/chat", json={"subject": subject, "topic": topic, "lang": "az", "stage": "quiz_next"},
+                   stream=True, timeout=60) as r:
+        assert r.status_code == 200
+        full, done = _consume_sse(r)
+    assert done and len(full) > 5
+
+    # 4. quiz_answer
+    time.sleep(1)
+    with sess.post(f"{API}/chat", json={"subject": subject, "topic": topic, "lang": "az",
+                                        "stage": "quiz_answer", "message": "0.5"},
+                   stream=True, timeout=60) as r:
+        assert r.status_code == 200
+        full, done = _consume_sse(r)
+    assert done and len(full) > 5
+
+    # 5. GET /messages must return the persisted lesson history under the SAME sha256 session_key
+    time.sleep(1.5)
+    r2 = sess.get(f"{API}/messages", params={"subject": subject, "topic": topic})
+    assert r2.status_code == 200
+    hist = r2.json()
+    roles = [m["role"] for m in hist]
+    contents = [m["content"] for m in hist]
+    # At least one user (recall or quiz_answer) and multiple assistant messages
+    assert "user" in roles and "assistant" in roles
+    assert any("Onluq kəsrlər verguldan" in c for c in contents), "recall user msg not persisted"
+    assert any("0.5" == c for c in contents), "quiz_answer user msg not persisted"
+
+
+def test_progress_aggregation(sess):
+    r = sess.get(f"{API}/progress")
+    assert r.status_code == 200
+    data = r.json()
+    for k in ("total_questions", "subjects_studied", "lessons_started", "by_subject"):
+        assert k in data
+    assert isinstance(data["by_subject"], list)
+    # after prior tests we should have Riyaziyyat studied
+    subjects = {b["subject"] for b in data["by_subject"]}
+    assert "Riyaziyyat" in subjects
+    assert data["lessons_started"] >= 1
