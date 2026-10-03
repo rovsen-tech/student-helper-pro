@@ -94,6 +94,41 @@ class Book(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
+PROVENANCE = ("SOURCE", "DERIVED", "GENERATED")
+CONTENT_TYPES = ("explanation", "definition", "rule", "worked_example", "task", "problem", "answer")
+
+
+class StructuredContent(BaseModel):
+    type: str          # one of CONTENT_TYPES
+    provenance: str = "SOURCE"   # one of PROVENANCE
+    text: str
+
+
+class Lesson(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    textbook_id: str
+    section_id: str
+    order: int = 0
+    title: str
+    content: List[StructuredContent] = []
+
+
+class Section(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    textbook_id: str
+    order: int = 0
+    title: str
+
+
+class Textbook(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    subject_id: str
+    title: str
+    grade: str = ""
+    provenance: str = "SOURCE"
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
 class ChatRequest(BaseModel):
     book_id: Optional[str] = None
     subject: Optional[str] = None
@@ -175,6 +210,29 @@ async def root():
 @api_router.get("/subjects")
 async def list_subjects():
     return SUBJECTS
+
+
+@api_router.get("/textbooks/{subject}")
+async def get_textbooks(subject: str):
+    tbs = await db.textbooks.find({"subject_id": subject}).to_list(100)
+    result = []
+    for tb in tbs:
+        secs = await db.sections.find({"textbook_id": tb["id"]}).sort("order", 1).to_list(100)
+        sections = []
+        for s in secs:
+            count = await db.lessons.count_documents({"section_id": s["id"]})
+            sections.append({"id": s["id"], "title": s["title"],
+                             "order": s.get("order", 0), "lesson_count": count})
+        result.append({"id": tb["id"], "subject_id": tb["subject_id"], "title": tb["title"],
+                       "grade": tb.get("grade", ""), "provenance": tb.get("provenance", "SOURCE"),
+                       "sections": sections})
+    return result
+
+
+@api_router.get("/lessons/{textbook_id}/{section_id}")
+async def get_lessons(textbook_id: str, section_id: str):
+    docs = await db.lessons.find({"textbook_id": textbook_id, "section_id": section_id}).sort("order", 1).to_list(200)
+    return [Lesson(**{k: v for k, v in d.items() if k != "_id"}).model_dump() for d in docs]
 
 
 @api_router.get("/books", response_model=List[Book])
@@ -449,6 +507,50 @@ SUBJECTS = [
 ]
 
 
+async def seed_textbooks():
+    tb_id = "tb-riyaziyyat-5"
+    if await db.textbooks.find_one({"id": tb_id}):
+        return
+    tb = Textbook(id=tb_id, subject_id="riyaziyyat",
+                  title="Riyaziyyat 5 (nümunə struktur)", grade="5-ci sinif", provenance="SOURCE")
+    await db.textbooks.insert_one(tb.model_dump())
+    sections = [
+        Section(id="sec-natural", textbook_id=tb_id, order=1, title="Natural ədədlər"),
+        Section(id="sec-fractions", textbook_id=tb_id, order=2, title="Adi kəsrlər"),
+    ]
+    for s in sections:
+        await db.sections.insert_one(s.model_dump())
+
+    def ph(type_, label):
+        # Placeholder only — NO fabricated textbook content. Real text will come from PDF ingestion.
+        return StructuredContent(type=type_, provenance="SOURCE",
+                                 text=f"[PLACEHOLDER — {label}. Real məzmun dərslik PDF-dən gələcək.]")
+
+    lessons = [
+        Lesson(id="les-natural-1", textbook_id=tb_id, section_id="sec-natural", order=1,
+               title="Natural ədədlərin oxunuşu və yazılışı",
+               content=[ph("explanation", "izah"), ph("definition", "tərif"), ph("rule", "qayda"),
+                        ph("worked_example", "həll olunmuş nümunə"), ph("task", "tapşırıq"),
+                        ph("problem", "məsələ"), ph("answer", "cavab")]),
+        Lesson(id="les-natural-2", textbook_id=tb_id, section_id="sec-natural", order=2,
+               title="Natural ədədlərin müqayisəsi",
+               content=[ph("explanation", "izah"), ph("definition", "tərif"),
+                        ph("worked_example", "həll olunmuş nümunə"), ph("task", "tapşırıq")]),
+        Lesson(id="les-fractions-1", textbook_id=tb_id, section_id="sec-fractions", order=1,
+               title="Kəsr anlayışı",
+               content=[ph("explanation", "izah"), ph("definition", "tərif"), ph("rule", "qayda"),
+                        ph("worked_example", "həll olunmuş nümunə"), ph("task", "tapşırıq"),
+                        ph("problem", "məsələ"), ph("answer", "cavab")]),
+        Lesson(id="les-fractions-2", textbook_id=tb_id, section_id="sec-fractions", order=2,
+               title="Kəsrlərin müqayisəsi",
+               content=[ph("explanation", "izah"), ph("worked_example", "həll olunmuş nümunə"),
+                        ph("task", "tapşırıq"), ph("answer", "cavab")]),
+    ]
+    for lesson in lessons:
+        await db.lessons.insert_one(lesson.model_dump())
+    logger.info("Riyaziyyat textbook foundation seeded")
+
+
 @app.on_event("startup")
 async def startup():
     try:
@@ -457,6 +559,7 @@ async def startup():
     except Exception as e:
         logger.error(f"Storage init failed: {e}")
     await db.books.delete_many({"is_sample": True})
+    await seed_textbooks()
     logger.info("Startup complete")
 
 
