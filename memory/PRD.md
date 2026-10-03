@@ -43,6 +43,18 @@ Parent's child has weak eyesight and cannot read lessons. Build an AI system tha
 - Stage indicator + big step buttons ("Mövzunu mən danışıram", "Suallara başla")
 - Voice answers supported at every step; lesson resets fresh on each open
 
+## Implemented (2026-06 — iteration 5: error-loop fix + Tutor Core + voices)
+- FIXED critical TTS error-loop: backend emits SSE {error:true} on failure (no apology text, not persisted); frontend shows a silent error + manual "Yenidən cəhd et" retry button and never auto-speaks errors; no infinite retry
+- Upgraded Tutor Core system prompt per pedagogy spec (rules 42-62): chunk→check→continue, active understanding checks instead of "başa düşdün?", think-time, minimum help, error-as-information, no fake praise, adaptive difficulty
+- Speech-prep layer: verbalizes fractions/percent/×/÷/=/° for natural Azerbaijani TTS
+- Two teacher voices (Mülayim=coral / Canlı=nova), persisted to localStorage
+- TTS token guard prevents overlapping/duplicate audio (prior fix retained)
+
+## Deferred (pedagogy spec, needs dedicated phase)
+- Stateful student model, mastery tracking, spaced review, cross-session memory (rules 56,59-61,66-68)
+- Interactive chunked voice loop with interrupt controls (Dayandır/Daha sadə/Başqa cür izah et) beyond current quick-asks (rule 51)
+- Accessible visual teaching tools: number lines, fraction bars, high-contrast diagrams (rules 65,69)
+
 ## Backlog
 - P1: Interactive quizzes with celebratory audio feedback (TopicSimplifierCard)
 - P1: Distraction-free magnifier reading mode with sentence highlighting

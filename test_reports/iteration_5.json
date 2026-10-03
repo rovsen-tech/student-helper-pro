@@ -1,0 +1,21 @@
+{
+  "summary": "Verified the primary error-loop bug fix for Ağıllı Dərs plus retry/recovery, two-voice (coral/nova) persistence, speech-prep TTS, and regression paths. Backend: 10/10 pytest passing (subjects=10, SSE streaming, TTS speech-prep for '3/4 və 25%' returns 200 audio/mpeg, nova voice accepted, invalid voice falls back, empty text 400). Frontend Playwright with page.route interception on **/api/chat returning SSE 'data: {error:true}' showed: (a) error-block appears EXACTLY ONCE with retry-btn, (b) ZERO /api/tts requests on failure (silent — the error is NOT spoken), (c) no auto-retry/loop. Clicking retry-btn while still failing produced exactly 1 new /api/chat call. After removing interception, retry streamed real content with EXACTLY 1 /api/tts call (no duplicate). voice-nova-btn selection persists in localStorage across reload and is sent as voice='nova' in /api/tts body. Parent panel and AZ/TR language toggle work.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_backend.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py gen(): on exception or empty output emits {error:true}+{done:true} and returns WITHOUT persisting assistant message — correct, prevents the error from being saved and later replayed.",
+    "TutorChat.readStream returns {full,error}; both runAssistant and send() set message.error and setRetryAction then skip speak() — the critical fix. speak() is ONLY invoked on success path.",
+    "retry-btn onClick captures retryAction then nulls it before invoking (prevents double-click accidental double-fire). Good.",
+    "useTTS tokenRef guard still intact — overlapping/stale speak() calls cannot create audio.",
+    "server.py line 331: after yielding error+done the function returns; subsequent yield for done is skipped — correct behavior."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend.py"],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% (all critical assertions)"},
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Use page.route('**/api/chat', fulfill with text/event-stream body 'data: {\"error\": true}\\n\\ndata: {\"done\": true}\\n\\n') to simulate failure. Count /api/tts POST requests across page.on('request') — must be 0 during the failed turn. Clear counters BEFORE clicking lesson-card-0. After unroute+retry, allow ~3-4s buffer post step-recall-btn to catch any delayed duplicate TTS.",
+  "rca of the issue": "Fixed. Original bug: backend injected an apology text 'Bağışla problem oldu, yenidən cəhd et' into the SSE stream on exception and persisted it; frontend treated it as a normal assistant message and auto-spoke it; the message was reloaded on reopen which recreated the loop. Fix: (1) backend emits {error:true}+{done:true} and does NOT persist; (2) frontend readStream returns {full,error}; on error renders error-block with retry-btn and NEVER calls speak(); (3) retry only fires on explicit user click. Verified end-to-end."
+}
