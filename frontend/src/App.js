@@ -18,6 +18,7 @@ function App() {
   const [theme, setTheme] = useState("light");
   const [fontStep, setFontStep] = useState(0);
   const [speed, setSpeed] = useState(1.0);
+  const [voice, setVoice] = useState(() => localStorage.getItem("voice") || "coral");
   const [books, setBooks] = useState([]);
   const [subjects, setSubjects] = useState([]);
   const [view, setView] = useState({ type: "home" });
@@ -26,6 +27,7 @@ function App() {
 
   useEffect(() => { document.documentElement.setAttribute("data-theme", theme); }, [theme]);
   useEffect(() => { document.documentElement.style.setProperty("--base-font", FONT_SIZES[fontStep]); }, [fontStep]);
+  useEffect(() => { localStorage.setItem("voice", voice); }, [voice]);
 
   const loadBooks = useCallback(async () => {
     try {
@@ -41,7 +43,7 @@ function App() {
 
   return (
     <div className="App">
-      <AccessibilityTopBar {...{ t, lang, setLang, theme, setTheme, fontStep, setFontStep, speed, setSpeed, onOpenParent: () => setView({ type: "parent" }) }} />
+      <AccessibilityTopBar {...{ t, lang, setLang, theme, setTheme, fontStep, setFontStep, speed, setSpeed, voice, setVoice, onOpenParent: () => setView({ type: "parent" }) }} />
       {view.type === "home" && (
         <Home t={t} lang={lang} subjects={subjects} books={books}
           onSubject={(s) => setView({ type: "subject", subject: s })}
@@ -54,7 +56,7 @@ function App() {
           onLesson={(topic) => setView({ type: "chat", ctx: { kind: "lesson", subject: view.subject.name, topic }, from: { type: "subject", subject: view.subject } })} />
       )}
       {view.type === "chat" && (
-        <TutorChat t={t} lang={lang} ctx={view.ctx} speed={speed}
+        <TutorChat t={t} lang={lang} ctx={view.ctx} speed={speed} voice={voice}
           onBack={() => setView(view.from || { type: "home" })} />
       )}
       {view.type === "parent" && (

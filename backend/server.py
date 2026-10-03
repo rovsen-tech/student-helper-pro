@@ -126,20 +126,26 @@ class TTSRequest(BaseModel):
     text: str
     lang: str = "az"
     speed: float = 1.0
+    voice: str = "coral"
 
 
 def tutor_system_message(lang: str, book=None, subject=None, topic=None) -> str:
     lang_name = "Azərbaycan dilində" if lang == "az" else "Türkçe"
     base = (
-        f"Sən 'Ağıllı Dərs' adlı mehriban, səbirli və həvəsləndirici bir müəllimsən. "
-        f"Azərbaycanın 5-ci sinif milli kurikulumuna (2024-2025 tədris ili) uyğun dərs keçirsən. "
-        f"10-11 yaşlı 5-ci sinif şagirdi ilə danışırsan. Şagirdin gözləri zəifdir, ona görə "
-        f"cavabların qısa, aydın və sadə olsun. HƏMİŞƏ {lang_name} cavab ver. "
-        f"Çətin anlayışları gündəlik həyatdan sadə bənzətmələrlə izah et. Qısa cümlələr işlət, "
-        f"emoji istifadə etmə. Cavabın sonunda şagirdi ruhlandır. "
-        f"Dərs metodun belədir: əvvəl mövzunu sadə izah et, sonra şagirdə öz sözləri ilə danışdır və "
-        f"səhvlərini mehribanca düzəlt, sonra bir-bir suallar ver; şagird bilməyəndə mövzunu daha da "
-        f"sadə şəkildə yenidən izah et. Həmişə mehriban və səbirli ol."
+        f"Sən 'Ağıllı Müəllim' adlı diqqətli, səbirli və mehriban şəxsi müəllimsən — sadəcə chatbot deyilsən. "
+        f"Azərbaycanın 5-ci sinif milli kurikuluna uyğun, 10-11 yaşlı şagirdə dərs keçirsən. "
+        f"Şagirdin gözləri zəifdir: mətn qısa olsun, əsas məlumat sözlə çatsın. HƏMİŞƏ {lang_name} təbii, "
+        f"yaşına uyğun, sadə dildə danış. Termini deyəndə onu adi sözlə izah et və bir nümunə ver.\n"
+        f"QAYDALAR:\n"
+        f"1) Uzun monoloq qurma. Bir kiçik fikir → qısa izah → (lazımsa) nümunə → şagirdə kiçik tapşırıq. 2-4 qısa cümlə kifayətdir.\n"
+        f"2) 'Başa düşdün?' deyə soruşma. Anlamağı belə yoxla: 'Bunu öz sözlərinlə necə deyərdin?', 'Növbəti addım nədir?', 'Bunlardan hansı doğrudur, niyə?', 'İndi buna oxşar birini sən həll et.'\n"
+        f"3) Sual verəndə cavabı dərhal özün demə — şagirdə düşünməyə imkan ver.\n"
+        f"4) Minimum kömək: şagird özü edə bilirsə qarışma; kiçik ipucu kifayətdirsə, bütöv həlli vermə.\n"
+        f"5) Səhv olanda 'Yanlışdır' demə. Əvvəl düzgün hissəni qeyd et, sonra fikrin hansı addımda dəyişdiyini tap, ən kiçik ipucu ver, şagird yenidən sınasın.\n"
+        f"6) Şagird 'başa düşmədim' desə, eyni cavabı təkrarlama — izah üsulunu dəyiş: daha sadə dil, konkret nümunə, gündəlik bənzətmə, kiçik ön-biliyə qayıt.\n"
+        f"7) Boş yerə tərifləmə. Tərif konkret və qazanılmış olsun (məs: 'İpucu olmadan həll etdin'). 'Əla/Möhtəşəm' kimi boş sözləri təkrarlama.\n"
+        f"8) Şagird asanlıqla həll edirsə çətinliyi artır; çətinlik çəkirsə sadələşdir və ön-biliyi bərpa et. Məqsəd — şagirdin müstəqilliyi.\n"
+        f"Emoji işlətmə. Hər şey sakit, aydın və başa düşülən olsun."
     )
     if subject:
         base += f"\n\nHazırkı fənn: {subject}."
@@ -308,6 +314,7 @@ async def chat_stream(req: ChatRequest):
 
     async def gen():
         full = ""
+        errored = False
         try:
             async for ev in chat.stream_message(UserMessage(text=context + user_text)):
                 if isinstance(ev, TextDelta):
@@ -317,7 +324,11 @@ async def chat_stream(req: ChatRequest):
                     break
         except Exception as e:
             logger.error(f"Chat error: {e}")
-            yield f"data: {json.dumps({'delta': ' (Bağışla, bir problem oldu, yenidən cəhd et.)'})}\n\n"
+            errored = True
+        if errored or not full.strip():
+            yield f"data: {json.dumps({'error': True})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+            return
         await db.messages.insert_one({
             "id": str(uuid.uuid4()), "session_id": session_id, "role": "assistant",
             "content": full, "created_at": datetime.now(timezone.utc).isoformat(),
@@ -361,6 +372,10 @@ async def get_progress():
 def clean_for_tts(text: str) -> str:
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"`{1,3}[^`]*`{1,3}", "", text)
+    # speech-prep: verbalize common math for natural Azerbaijani speech
+    text = re.sub(r"(\d+)\s*%", r"\1 faiz", text)
+    text = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1 bölü \2", text)
+    text = text.replace("×", " vur ").replace("÷", " bölü ").replace("=", " bərabərdir ").replace("°", " dərəcə ")
     text = re.sub(r"[*_#>~|]", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
@@ -371,7 +386,8 @@ async def tts(req: TTSRequest):
     if not text:
         raise HTTPException(400, "Mətn boşdur")
     speed = max(0.5, min(2.0, req.speed))
-    key = hashlib.sha256(f"{text}|{speed}|coral".encode()).hexdigest()
+    voice = req.voice if req.voice in ("coral", "nova") else "coral"
+    key = hashlib.sha256(f"{text}|{speed}|{voice}".encode()).hexdigest()
     cached = await db.tts_cache.find_one({"key": key})
     if cached and cached.get("storage_path"):
         try:
@@ -383,7 +399,7 @@ async def tts(req: TTSRequest):
     audio = None
     try:
         engine = OpenAITextToSpeech(api_key=EMERGENT_KEY)
-        audio = await engine.generate_speech(text=text, model="tts-1", voice="coral", speed=speed)
+        audio = await engine.generate_speech(text=text, model="tts-1", voice=voice, speed=speed)
     except Exception as e:
         logger.error(f"TTS failed: {e}")
         raise HTTPException(500, "Səs yaradıla bilmədi")

@@ -3,7 +3,7 @@ import { useRef, useState, useCallback } from "react";
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
-export function useTTS(lang, speed) {
+export function useTTS(lang, speed, voice) {
   const [speakingId, setSpeakingId] = useState(null);
   const [loading, setLoading] = useState(false);
   const audioRef = useRef(null);
@@ -30,7 +30,7 @@ export function useTTS(lang, speed) {
       const res = await fetch(`${API}/tts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, lang, speed }),
+        body: JSON.stringify({ text, lang, speed, voice }),
       });
       if (!res.ok) throw new Error("tts failed");
       const blob = await res.blob();
@@ -60,7 +60,7 @@ export function useTTS(lang, speed) {
         setLoading(false);
       }
     }
-  }, [lang, speed, stop]);
+  }, [lang, speed, voice, stop]);
 
   return { speak, stop, speakingId, loading };
 }

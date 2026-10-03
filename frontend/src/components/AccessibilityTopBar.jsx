@@ -7,7 +7,7 @@ const THEMES = [
 ];
 const SPEEDS = [0.8, 1.0, 1.2];
 
-export const AccessibilityTopBar = ({ t, lang, setLang, theme, setTheme, fontStep, setFontStep, speed, setSpeed, onOpenParent }) => {
+export const AccessibilityTopBar = ({ t, lang, setLang, theme, setTheme, fontStep, setFontStep, speed, setSpeed, voice, setVoice, onOpenParent }) => {
   return (
     <header
       data-testid="accessibility-topbar"
@@ -68,6 +68,18 @@ export const AccessibilityTopBar = ({ t, lang, setLang, theme, setTheme, fontSte
                 {l.toUpperCase()}
               </button>
             ))}
+          </div>
+
+          {/* Voice profile */}
+          <div className="flex items-center gap-1 bg-surface-2 rounded-2xl p-1 border-solid-2">
+            <button data-testid="voice-coral-btn" onClick={() => setVoice("coral")} title={t.voiceGentle}
+              className={`h-11 px-3 rounded-xl font-bold text-base transition-colors ${voice === "coral" ? "bg-accent text-white accent-fg" : "hover:bg-surface"}`}>
+              {t.voiceGentle}
+            </button>
+            <button data-testid="voice-nova-btn" onClick={() => setVoice("nova")} title={t.voiceLively}
+              className={`h-11 px-3 rounded-xl font-bold text-base transition-colors ${voice === "nova" ? "bg-accent text-white accent-fg" : "hover:bg-surface"}`}>
+              {t.voiceLively}
+            </button>
           </div>
 
           {/* Parent panel */}

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { ArrowLeft, Send, Mic, Volume2, Square, Loader2, GraduationCap, Sparkles, PencilLine, ListChecks } from "lucide-react";
+import { ArrowLeft, Send, Mic, Volume2, Square, Loader2, GraduationCap, Sparkles, PencilLine, ListChecks, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { useTTS } from "../hooks/useTTS";
 
@@ -15,7 +15,7 @@ const Waveform = () => (
   </div>
 );
 
-export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
+export const TutorChat = ({ t, lang, ctx, speed, voice, onBack }) => {
   const book = ctx.kind === "book" ? ctx.book : null;
   const subject = ctx.kind === "lesson" ? ctx.subject : null;
   const topic = ctx.kind === "lesson" ? ctx.topic : null;
@@ -24,7 +24,8 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
   const [streaming, setStreaming] = useState(false);
   const [listening, setListening] = useState(false);
   const [stage, setStage] = useState(null);
-  const { speak, stop, speakingId, loading } = useTTS(lang, speed);
+  const [retryAction, setRetryAction] = useState(null);
+  const { speak, stop, speakingId, loading } = useTTS(lang, speed, voice);
   const scrollRef = useRef(null);
   const recRef = useRef(null);
   const inputRef = useRef(null);
@@ -42,7 +43,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
   const readStream = async (res, aiId) => {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = "", full = "";
+    let buffer = "", full = "", error = false;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -58,41 +59,53 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
             full += obj.delta;
             setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: full } : x)));
             scrollDown();
+          } else if (obj.error) {
+            error = true;
           }
         } catch (err) { console.warn("SSE parse skipped", err); }
       }
     }
-    return full;
+    return { full, error };
   };
 
-  const runAssistant = async (body, seedId) => {
+  const runAssistant = async (body, seedId, retryFn) => {
     const aiId = seedId || `a${Date.now()}`;
     setMessages((m) => (seedId ? [{ role: "assistant", content: "", id: aiId }] : [...m, { role: "assistant", content: "", id: aiId }]));
     setStreaming(true);
+    setRetryAction(null);
     scrollDown();
+    let result = { full: "", error: false };
     try {
       const res = await fetch(`${API}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const full = await readStream(res, aiId);
-      if (full) speak(full, aiId);
-    } catch {
-      toast.error("Xəta");
+      if (!res.ok) throw new Error("http " + res.status);
+      result = await readStream(res, aiId);
+    } catch (err) {
+      console.error("assistant error", err);
+      result.error = true;
     } finally { setStreaming(false); scrollDown(); }
+    if (result.error || !result.full.trim()) {
+      setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: "", error: true } : x)));
+      setRetryAction(() => (retryFn || (() => runAssistant(body, seedId, retryFn))));
+      return false;
+    }
+    speak(result.full, aiId);
+    return true;
   };
 
   const streamExplain = async () => {
-    await runAssistant({ subject, topic, lang, explain: true }, "explain");
-    setStage("explained");
+    const ok = await runAssistant({ subject, topic, lang, explain: true }, "explain", streamExplain);
+    if (ok) setStage("explained");
   };
 
   const startRecall = () => { setStage("recall_input"); inputRef.current?.focus(); };
 
   const startQuiz = async () => {
     setStage("quiz");
-    await runAssistant({ subject, topic, lang, stage: "quiz_next" });
+    await runAssistant({ subject, topic, lang, stage: "quiz_next" }, undefined, startQuiz);
   };
 
   const initRef = useRef(null);
@@ -125,6 +138,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
     if (!msg || streaming) return;
     stop();
     setInput("");
+    setRetryAction(null);
     const effStage = subject && topic
       ? (stage === "recall_input" ? "recall" : stage === "quiz" ? "quiz_answer" : undefined)
       : undefined;
@@ -133,21 +147,30 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
     setMessages((m) => [...m, userMsg, { role: "assistant", content: "", id: aiId }]);
     setStreaming(true);
     scrollDown();
+    const body = { book_id: book?.id || null, subject, topic, message: msg, lang, stage: effStage };
+    let result = { full: "", error: false };
     try {
       const res = await fetch(`${API}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ book_id: book?.id || null, subject, topic, message: msg, lang, stage: effStage }),
+        body: JSON.stringify(body),
       });
-      const full = await readStream(res, aiId);
-      if (full) speak(full, aiId);
-      if (effStage === "recall") setStage("recalled");
-    } catch {
-      toast.error("Xəta");
+      if (!res.ok) throw new Error("http " + res.status);
+      result = await readStream(res, aiId);
+    } catch (err) {
+      console.error("send error", err);
+      result.error = true;
     } finally {
       setStreaming(false);
       scrollDown();
     }
+    if (result.error || !result.full.trim()) {
+      setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: "", error: true } : x)));
+      setRetryAction(() => () => send(msg));
+      return;
+    }
+    speak(result.full, aiId);
+    if (effStage === "recall") setStage("recalled");
   }, [input, streaming, book, subject, topic, lang, stage, speak, stop]);
 
   const startMic = () => {
@@ -194,13 +217,25 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
           <div key={m.id} className={`rise flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
             <div className={`max-w-[85%] rounded-3xl px-5 py-4 border-solid-2 ${m.role === "user" ? "bg-accent text-white accent-fg" : "bg-surface"}`}
               style={m.role === "user" ? { borderColor: "var(--accent)" } : {}}>
-              <p className="text-xl whitespace-pre-wrap leading-relaxed">{m.content || (streaming ? t.thinking : "")}</p>
-              {m.role === "assistant" && m.content && (
-                <button data-testid={`listen-btn-${m.id}`} onClick={() => (speakingId === m.id ? stop() : speak(m.content, m.id))}
-                  className="mt-3 inline-flex items-center gap-2 h-11 px-4 rounded-2xl bg-surface-2 border-solid-2 font-bold text-lg hover:bg-accent hover:text-white transition-colors">
-                  {speakingId === m.id ? (loading ? <Loader2 size={22} className="animate-spin" /> : <Square size={20} />) : <Volume2 size={22} />}
-                  {speakingId === m.id ? t.stop : t.listen}
-                </button>
+              {m.error ? (
+                <div data-testid="error-block">
+                  <p className="text-xl leading-relaxed">{t.errorMsg}</p>
+                  <button data-testid="retry-btn" onClick={() => { const fn = retryAction; setRetryAction(null); if (fn) fn(); }}
+                    className="mt-3 inline-flex items-center gap-2 h-11 px-4 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-bold text-lg hover:opacity-90 transition-opacity">
+                    <RefreshCw size={22} /> {t.retryBtn}
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <p className="text-xl whitespace-pre-wrap leading-relaxed">{m.content || (streaming ? t.thinking : "")}</p>
+                  {m.role === "assistant" && m.content && (
+                    <button data-testid={`listen-btn-${m.id}`} onClick={() => (speakingId === m.id ? stop() : speak(m.content, m.id))}
+                      className="mt-3 inline-flex items-center gap-2 h-11 px-4 rounded-2xl bg-surface-2 border-solid-2 font-bold text-lg hover:bg-accent hover:text-white transition-colors">
+                      {speakingId === m.id ? (loading ? <Loader2 size={22} className="animate-spin" /> : <Square size={20} />) : <Volume2 size={22} />}
+                      {speakingId === m.id ? t.stop : t.listen}
+                    </button>
+                  )}
+                </>
               )}
             </div>
           </div>
