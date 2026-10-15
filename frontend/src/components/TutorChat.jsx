@@ -27,6 +27,8 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
   const { speak, stop, speakingId, loading } = useTTS(lang, speed);
   const scrollRef = useRef(null);
   const recRef = useRef(null);
+  const micHeldRef = useRef(false);
+  const micTranscriptRef = useRef("");
   const inputRef = useRef(null);
   const autoSpokeRef = useRef(false);
 
@@ -150,21 +152,61 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
     }
   }, [input, streaming, book, subject, topic, lang, stage, speak, stop]);
 
-  const startMic = () => {
+  const startMic = (event) => {
+    if (micHeldRef.current) return;
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { toast.error(t.micError); return; }
     stop();
-    const rec = new SR();
-    rec.lang = lang === "az" ? "az-AZ" : "tr-TR";
-    rec.interimResults = false;
-    rec.onresult = (e) => { const txt = e.results[0][0].transcript; setInput(txt); send(txt); };
-    rec.onerror = () => { setListening(false); toast.error(t.micError); };
-    rec.onend = () => setListening(false);
-    recRef.current = rec;
+    event?.currentTarget.setPointerCapture?.(event.pointerId);
+    micHeldRef.current = true;
+    micTranscriptRef.current = "";
+    setInput("");
     setListening(true);
-    rec.start();
+    const startRecognition = () => {
+      if (!micHeldRef.current) return;
+      const rec = new SR();
+      rec.lang = lang === "az" ? "az-AZ" : "tr-TR";
+      rec.continuous = true;
+      rec.interimResults = false;
+      rec.onresult = (e) => {
+        const transcript = Array.from(e.results)
+          .slice(e.resultIndex)
+          .filter((result) => result.isFinal)
+          .map((result) => result[0].transcript.trim())
+          .filter(Boolean)
+          .join(" ");
+        if (!transcript) return;
+        micTranscriptRef.current = [micTranscriptRef.current, transcript].filter(Boolean).join(" ");
+        setInput(micTranscriptRef.current);
+      };
+      rec.onerror = (e) => {
+        if (e.error === "no-speech") return;
+        micHeldRef.current = false;
+        setListening(false);
+        toast.error(t.micError);
+      };
+      rec.onend = () => {
+        if (recRef.current === rec) recRef.current = null;
+        if (micHeldRef.current) startRecognition();
+        else setListening(false);
+      };
+      recRef.current = rec;
+      try {
+        rec.start();
+      } catch {
+        micHeldRef.current = false;
+        recRef.current = null;
+        setListening(false);
+        toast.error(t.micError);
+      }
+    };
+    startRecognition();
   };
-  const stopMic = () => { recRef.current?.stop(); setListening(false); };
+  const stopMic = () => {
+    micHeldRef.current = false;
+    recRef.current?.stop();
+    setListening(false);
+  };
 
   const quicks = [t.q1, t.q2, t.q3];
 
@@ -244,9 +286,23 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
 
       {/* Input */}
       <div className="flex items-end gap-3">
-        <button data-testid="mic-btn" onClick={listening ? stopMic : startMic}
+        <button data-testid="mic-btn"
+          onPointerDown={startMic}
+          onPointerUp={stopMic}
+          onPointerCancel={stopMic}
+          onLostPointerCapture={stopMic}
+          onKeyDown={(e) => {
+            if ((e.key === " " || e.key === "Enter") && !e.repeat) {
+              e.preventDefault();
+              startMic();
+            }
+          }}
+          onKeyUp={(e) => {
+            if (e.key === " " || e.key === "Enter") stopMic();
+          }}
+          onBlur={stopMic}
           className={`w-16 h-16 rounded-2xl flex items-center justify-center shrink-0 border-solid-2 transition-colors ${listening ? "bg-accent-warm pulse-ring" : "bg-surface hover:bg-surface-2"}`}
-          style={listening ? { background: "var(--accent-warm)", color: "#fff" } : {}}>
+          style={{ ...(listening ? { background: "var(--accent-warm)", color: "#fff" } : {}), touchAction: "none" }}>
           {listening ? <Waveform /> : <Mic size={30} />}
         </button>
         <div className="flex-1 flex items-end gap-2 bg-surface border-solid-2 rounded-3xl p-2">
