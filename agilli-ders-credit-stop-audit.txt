@@ -1,0 +1,1408 @@
+========== GIT STATUS ==========
+ M backend/requirements.txt
+ M backend/server.py
+ M frontend/src/App.js
+ M frontend/src/components/SubjectView.jsx
+ M frontend/src/components/TutorChat.jsx
+?? .emergent/cron/
+?? backend/.env
+?? backend/ingest_textbook.py
+?? backend/mathbook.pdf
+?? frontend/.env
+?? frontend/yarn.lock
+?? yarn.lock
+
+========== RECENT COMMITS ==========
+bb979e0 ## STRUCTURED TEXTBOOK FOUNDATION hazırdır — yalnız bu quruldu, başqa heç nə
+5fa6943 ## Kritik ses döngüsü bug'ı ile ilgili ilk düzeltme yapıldı ve Öğretmen Çekirdeği (Tutor Core) yükseltildi
+12be3a5 checkpoint before testing_agent_full_stack
+b390d82 Ses tekrarlanma bug'ı için önemli düzeltmeler yapıldı ve testing agent tarafından ilk aşamada doğrulandı.
+04413df checkpoint before testing_agent_full_stack
+286cfb8 I have addressed the fixes and verified them with no regressions. Backend tests with pytest all pass (12/12), frontend flows are functioning correctly, and the reviewer has confirmed each change is accurate.
+caf0a16 checkpoint before testing_agent_full_stack
+e863649 ## Dərs Axını (4 Mərhələli Öyrənmə Döngüsü) Əlavə Edildi
+a3bf4ab ## "Ağıllı Dərs" — Peşəkar Marka + 5-ci Sinif Milli Kurikulum Tamamlandı
+31aef9e checkpoint before testing_agent_full_stack
+
+========== CHANGED FILES ==========
+backend/requirements.txt
+backend/server.py
+frontend/src/App.js
+frontend/src/components/SubjectView.jsx
+frontend/src/components/TutorChat.jsx
+
+========== BACKEND SERVER ==========
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Response
+from fastapi.responses import StreamingResponse
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import re
+import json
+import hashlib
+import logging
+import tempfile
+from pathlib import Path
+from pydantic import BaseModel, Field
+from typing import List, Optional
+import uuid
+from datetime import datetime, timezone
+
+import requests
+from emergentintegrations.llm.chat import (
+    LlmChat, UserMessage, FileContentWithMimeType, TextDelta, StreamDone,
+)
+from emergentintegrations.llm.openai import OpenAITextToSpeech
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
+MODEL_PROVIDER = "gemini"
+MODEL_NAME = "gemini-3.1-pro-preview"
+
+# ---- Object storage ----
+STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
+STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
+APP_NAME = "gozum-bilgim"
+storage_key = None
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+def init_storage(force: bool = False):
+    global storage_key
+    if storage_key and not force:
+        return storage_key
+    resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
+    resp.raise_for_status()
+    storage_key = resp.json()["storage_key"]
+    return storage_key
+
+
+def put_object(path: str, data: bytes, content_type: str) -> dict:
+    key = init_storage()
+    resp = requests.put(f"{STORAGE_URL}/objects/{path}",
+                        headers={"X-Storage-Key": key, "Content-Type": content_type},
+                        data=data, timeout=120)
+    if resp.status_code == 404:
+        key = init_storage(force=True)
+        resp = requests.put(f"{STORAGE_URL}/objects/{path}",
+                            headers={"X-Storage-Key": key, "Content-Type": content_type},
+                            data=data, timeout=120)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_object(path: str) -> bytes:
+    key = init_storage()
+    resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    if resp.status_code == 404:
+        key = init_storage(force=True)
+        resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    resp.raise_for_status()
+    return resp.content
+
+
+app = FastAPI()
+api_router = APIRouter(prefix="/api")
+
+
+# ---- Models ----
+class Book(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    title: str
+    subject: str = ""
+    grade: str = ""
+    summary: str = ""
+    key_topics: List[str] = []
+    explanation: str = ""
+    storage_path: Optional[str] = None
+    is_sample: bool = False
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+PROVENANCE = ("SOURCE", "DERIVED", "GENERATED")
+CONTENT_TYPES = ("explanation", "definition", "rule", "worked_example", "task",
+                 "problem", "answer", "investigation", "think", "note", "summary", "glossary")
+
+
+class StructuredContent(BaseModel):
+    type: str          # one of CONTENT_TYPES
+    provenance: str = "SOURCE"   # one of PROVENANCE
+    text: str
+    normalized_text: str = ""
+    original_text: str = ""
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    source_page: Optional[int] = None
+
+
+class Lesson(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    textbook_id: str
+    section_id: str
+    order: int = 0
+    number: str = ""
+    title: str
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    content: List[StructuredContent] = []
+
+
+class Section(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    textbook_id: str
+    order: int = 0
+    title: str
+
+
+class Textbook(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    subject_id: str
+    title: str
+    grade: str = ""
+    provenance: str = "SOURCE"
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class ChatRequest(BaseModel):
+    book_id: Optional[str] = None
+    subject: Optional[str] = None
+    topic: Optional[str] = None
+    message: str = ""
+    lang: str = "az"
+    explain: bool = False
+    stage: Optional[str] = None
+    lesson_id: Optional[str] = None
+
+
+def session_key(book_id=None, subject=None, topic=None):
+    if book_id:
+        return f"book-{book_id}"
+    if subject and topic:
+        return "lesson-" + hashlib.sha256(f"{subject}|{topic}".encode()).hexdigest()[:12]
+    return "general"
+
+
+async def record_activity(subject, topic, is_question):
+    now = datetime.now(timezone.utc).isoformat()
+    update = {"$set": {"last_active": now}, "$setOnInsert": {"started_at": now}}
+    if is_question:
+        update["$inc"] = {"question_count": 1}
+    else:
+        update["$set"]["explained"] = True
+    await db.progress.update_one({"subject": subject, "topic": topic}, update, upsert=True)
+
+
+class TTSRequest(BaseModel):
+    text: str
+    lang: str = "az"
+    speed: float = 1.0
+    voice: str = "coral"
+
+
+def tutor_system_message(lang: str, book=None, subject=None, topic=None, lesson_source=None) -> str:
+    lang_name = "Azərbaycan dilində" if lang == "az" else "Türkçe"
+    base = (
+        f"Sən 'Ağıllı Müəllim' adlı diqqətli, səbirli və mehriban şəxsi müəllimsən — sadəcə chatbot deyilsən. "
+        f"Azərbaycanın 5-ci sinif milli kurikuluna uyğun, 10-11 yaşlı şagirdə dərs keçirsən. "
+        f"Şagirdin gözləri zəifdir: mətn qısa olsun, əsas məlumat sözlə çatsın. HƏMİŞƏ {lang_name} təbii, "
+        f"yaşına uyğun, sadə dildə danış. Termini deyəndə onu adi sözlə izah et və bir nümunə ver.\n"
+        f"QAYDALAR:\n"
+        f"1) Uzun monoloq qurma. Bir kiçik fikir → qısa izah → (lazımsa) nümunə → şagirdə kiçik tapşırıq. 2-4 qısa cümlə kifayətdir.\n"
+        f"2) 'Başa düşdün?' deyə soruşma. Anlamağı belə yoxla: 'Bunu öz sözlərinlə necə deyərdin?', 'Növbəti addım nədir?', 'Bunlardan hansı doğrudur, niyə?', 'İndi buna oxşar birini sən həll et.'\n"
+        f"3) Sual verəndə cavabı dərhal özün demə — şagirdə düşünməyə imkan ver.\n"
+        f"4) Minimum kömək: şagird özü edə bilirsə qarışma; kiçik ipucu kifayətdirsə, bütöv həlli vermə.\n"
+        f"5) Səhv olanda 'Yanlışdır' demə. Əvvəl düzgün hissəni qeyd et, sonra fikrin hansı addımda dəyişdiyini tap, ən kiçik ipucu ver, şagird yenidən sınasın.\n"
+        f"6) Şagird 'başa düşmədim' desə, eyni cavabı təkrarlama — izah üsulunu dəyiş: daha sadə dil, konkret nümunə, gündəlik bənzətmə, kiçik ön-biliyə qayıt.\n"
+        f"7) Boş yerə tərifləmə. Tərif konkret və qazanılmış olsun (məs: 'İpucu olmadan həll etdin'). 'Əla/Möhtəşəm' kimi boş sözləri təkrarlama.\n"
+        f"8) Şagird asanlıqla həll edirsə çətinliyi artır; çətinlik çəkirsə sadələşdir və ön-biliyi bərpa et. Məqsəd — şagirdin müstəqilliyi.\n"
+        f"Emoji işlətmə. Hər şey sakit, aydın və başa düşülən olsun."
+    )
+    if subject:
+        base += f"\n\nHazırkı fənn: {subject}."
+        if topic:
+            base += f" Mövzu: «{topic}». Cavablarını bu fənn və mövzu ətrafında saxla."
+    if lesson_source:
+        base += (
+            "\n\nDƏRSLİK MƏNBƏYİ (ƏSAS HƏQİQƏT — yalnız buna əsaslan, kənardan məlumat və ya "
+            "səhifə nömrəsi uydurma):\n" + lesson_source[:3500]
+        )
+    if book:
+        base += (
+            f"\n\nHazırda bu dərsliyi öyrənirsiniz:\nBaşlıq: {book.get('title','')}\n"
+            f"Xülasə: {book.get('summary','')}\n"
+            f"Əsas mövzular: {', '.join(book.get('key_topics', []))}\n"
+            f"Detallı məzmun: {book.get('explanation','')[:4000]}\n"
+            f"Şagirdin suallarını bu dərsliyin məzmununa əsasən cavablandır."
+        )
+    return base
+
+
+def make_chat(session_id: str, system_message: str) -> LlmChat:
+    return LlmChat(api_key=EMERGENT_KEY, session_id=session_id,
+                   system_message=system_message).with_model(MODEL_PROVIDER, MODEL_NAME)
+
+
+@api_router.get("/")
+async def root():
+    return {"message": "Ağıllı Dərs hazırdır"}
+
+
+@api_router.get("/subjects")
+async def list_subjects():
+    return SUBJECTS
+
+
+@api_router.get("/textbooks/{subject}")
+async def get_textbooks(subject: str):
+    tbs = await db.textbooks.find({"subject_id": subject}).to_list(100)
+    result = []
+    for tb in tbs:
+        secs = await db.sections.find({"textbook_id": tb["id"]}).sort("order", 1).to_list(100)
+        sections = []
+        for s in secs:
+            count = await db.lessons.count_documents({"section_id": s["id"]})
+            sections.append({"id": s["id"], "title": s["title"],
+                             "order": s.get("order", 0), "lesson_count": count})
+        result.append({"id": tb["id"], "subject_id": tb["subject_id"], "title": tb["title"],
+                       "grade": tb.get("grade", ""), "provenance": tb.get("provenance", "SOURCE"),
+                       "sections": sections})
+    return result
+
+
+@api_router.get("/lessons/{textbook_id}/{section_id}")
+async def get_lessons(textbook_id: str, section_id: str):
+    docs = await db.lessons.find({"textbook_id": textbook_id, "section_id": section_id}).sort("order", 1).to_list(200)
+    return [Lesson(**{k: v for k, v in d.items() if k != "_id"}).model_dump() for d in docs]
+
+
+@api_router.get("/books", response_model=List[Book])
+async def list_books():
+    docs = await db.books.find({"is_deleted": {"$ne": True}}).sort("created_at", 1).to_list(1000)
+    return [Book(**{k: v for k, v in d.items() if k != "_id"}) for d in docs]
+
+
+@api_router.get("/books/{book_id}", response_model=Book)
+async def get_book(book_id: str):
+    d = await db.books.find_one({"id": book_id, "is_deleted": {"$ne": True}})
+    if not d:
+        raise HTTPException(404, "Kitab tapılmadı")
+    return Book(**{k: v for k, v in d.items() if k != "_id"})
+
+
+@api_router.post("/books/upload", response_model=Book)
+async def upload_book(file: UploadFile = File(...), lang: str = Form("az")):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Yalnız PDF faylları qəbul olunur")
+    data = await file.read()
+    path = f"{APP_NAME}/uploads/{uuid.uuid4()}.pdf"
+    try:
+        put_object(path, data, "application/pdf")
+    except Exception as e:
+        logger.error(f"Storage upload failed: {e}")
+        raise HTTPException(500, "Fayl yüklənə bilmədi")
+
+    # Analyze PDF with Gemini
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp.write(data)
+    tmp.close()
+    analysis = {}
+    try:
+        chat = make_chat(f"analyze-{uuid.uuid4()}",
+                         "Sən təhsil məzmununu təhlil edən bir köməkçisən. Yalnız JSON qaytar.")
+        prompt = (
+            "Bu PDF dərsliyi təhlil et və 11-14 yaşlı uşaq üçün sadələşdir. "
+            "SADƏCƏ bu formatda düzgün JSON qaytar (başqa mətn yox), dəyərlər "
+            + ("Azərbaycan dilində" if lang == "az" else "Türkçe") + " olsun:\n"
+            '{"title": "qısa başlıq", "subject": "fənn", "grade": "sinif", '
+            '"summary": "2-3 cümləlik xülasə", "key_topics": ["mövzu1","mövzu2","mövzu3"], '
+            '"explanation": "uşağa uyğun sadə və maraqlı izah, bənzətmələrlə, 300-500 söz"}'
+        )
+        pdf_file = FileContentWithMimeType(file_path=tmp.name, mime_type="application/pdf")
+        buf = ""
+        async for ev in chat.stream_message(UserMessage(text=prompt, file_contents=[pdf_file])):
+            if isinstance(ev, TextDelta):
+                buf += ev.content
+            elif isinstance(ev, StreamDone):
+                break
+        m = re.search(r"\{.*\}", buf, re.DOTALL)
+        if m:
+            analysis = json.loads(m.group(0))
+    except Exception as e:
+        logger.error(f"PDF analysis failed: {e}")
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
+    book = Book(
+        title=analysis.get("title") or file.filename.replace(".pdf", ""),
+        subject=analysis.get("subject", ""),
+        grade=analysis.get("grade", ""),
+        summary=analysis.get("summary", ""),
+        key_topics=analysis.get("key_topics", []) or [],
+        explanation=analysis.get("explanation", ""),
+        storage_path=path,
+    )
+    doc = book.model_dump()
+    doc["is_deleted"] = False
+    await db.books.insert_one(doc)
+    return book
+
+
+@api_router.post("/chat")
+async def chat_stream(req: ChatRequest):
+    book = None
+    if req.book_id:
+        book = await db.books.find_one({"id": req.book_id})
+    session_id = session_key(req.book_id, req.subject, req.topic)
+    lesson_source = None
+    if req.lesson_id:
+        ldoc = await db.lessons.find_one({"id": req.lesson_id})
+        if ldoc:
+            parts = []
+            for c in ldoc.get("content", []):
+                if c.get("provenance") == "SOURCE" and c.get("type") != "answer":
+                    parts.append(c.get("normalized_text") or c.get("text", ""))
+            pref = ""
+            if ldoc.get("page_start"):
+                pref = f"(səhifə {ldoc['page_start']}-{ldoc.get('page_end', ldoc['page_start'])}) "
+            lesson_source = pref + "\n".join(p for p in parts if p)
+    sysmsg = tutor_system_message(req.lang, book, req.subject, req.topic, lesson_source)
+
+    history = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(20)
+    chat = make_chat(session_id, sysmsg)
+
+    if req.explain:
+        await db.messages.delete_many({"session_id": session_id})
+        user_text = (f"«{req.topic}» mövzusunu 5-ci sinif şagirdinə uyğun, maraqlı və sadə "
+                     f"şəkildə, gündəlik nümunələrlə izah et. Qısa və aydın saxla. "
+                     f"Sonda şagirdə de ki, indi növbə onundur və bu mövzunu öz sözləri ilə danışmalıdır.")
+    elif req.stage == "recall":
+        if req.message:
+            await db.messages.insert_one({
+                "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
+                "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        user_text = (f"Şagird «{req.topic}» mövzusunu öz sözləri ilə belə izah etdi:\n«{req.message}»\n"
+                     f"Doğru və yaxşı hissələri qısaca tərif et, varsa səhvləri çox mehribanca düzəlt və "
+                     f"düzgün formasını de. Sonra ona de: «Əla! İndi sənə bu mövzudan bir neçə sual verəcəm, hazırsan?»")
+    elif req.stage == "quiz_next":
+        user_text = (f"Şagirdə «{req.topic}» mövzusundan BİR qısa və sadə sual ver. "
+                     f"Əvvəl verdiyin sualları təkrar etmə. Yalnız sualı yaz, cavabı yazma.")
+    elif req.stage == "quiz_answer":
+        if req.message:
+            await db.messages.insert_one({
+                "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
+                "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        user_text = (f"Bu, verdiyin sonuncu suala şagirdin cavabıdır:\n«{req.message}»\n"
+                     f"Əgər cavab doğrudursa, onu təriflə və dərhal növbəti qısa sualı ver. "
+                     f"Əgər cavab səhvdirsə və ya şagird bilmədiyini deyirsə, həmin mövzunu müəllimdən daha "
+                     f"yaxşı, daha sadə şəkildə, gündəlik nümunə ilə yenidən izah et, sonra asan bir sual ver. "
+                     f"Təxminən 3 sualdan sonra dərsi ürəkləndirici sözlərlə bitir.")
+    else:
+        user_text = req.message
+        await db.messages.insert_one({
+            "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
+            "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    context = ""
+    if history and not req.explain:
+        recent = history[-8:]
+        context = "Əvvəlki söhbət:\n" + "\n".join(
+            f"{'Şagird' if m['role']=='user' else 'Müəllim'}: {m['content']}" for m in recent) + "\n\nTapşırıq: "
+
+    if req.subject and req.topic:
+        a_subject, a_topic = req.subject, req.topic
+    elif book:
+        a_subject, a_topic = "Yüklənən kitablar", book.get("title", "Kitab")
+    else:
+        a_subject, a_topic = "Ümumi söhbət", "Suallar"
+    await record_activity(a_subject, a_topic, (not req.explain) and bool(req.message))
+
+    async def gen():
+        full = ""
+        errored = False
+        try:
+            async for ev in chat.stream_message(UserMessage(text=context + user_text)):
+                if isinstance(ev, TextDelta):
+                    full += ev.content
+                    yield f"data: {json.dumps({'delta': ev.content})}\n\n"
+                elif isinstance(ev, StreamDone):
+                    break
+        except Exception as e:
+            logger.error(f"Chat error: {e}")
+            errored = True
+        if errored or not full.strip():
+            yield f"data: {json.dumps({'error': True})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+            return
+        await db.messages.insert_one({
+            "id": str(uuid.uuid4()), "session_id": session_id, "role": "assistant",
+            "content": full, "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@api_router.get("/messages")
+async def get_messages(book_id: str = None, subject: str = None, topic: str = None):
+    session_id = session_key(book_id, subject, topic)
+    docs = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(200)
+    return [{"role": d["role"], "content": d["content"], "id": d["id"]} for d in docs]
+
+
+@api_router.get("/progress")
+async def get_progress():
+    docs = await db.progress.find({}).sort("last_active", -1).to_list(1000)
+    by_subject = {}
+    total_q = 0
+    for d in docs:
+        s = d["subject"]
+        by_subject.setdefault(s, {"subject": s, "lessons": [], "total_questions": 0, "last_active": d.get("last_active")})
+        by_subject[s]["lessons"].append({
+            "topic": d["topic"], "question_count": d.get("question_count", 0),
+            "explained": d.get("explained", False), "last_active": d.get("last_active"),
+        })
+        by_subject[s]["total_questions"] += d.get("question_count", 0)
+        total_q += d.get("question_count", 0)
+    return {
+        "total_questions": total_q,
+        "subjects_studied": len(by_subject),
+        "lessons_started": len(docs),
+        "last_active": docs[0].get("last_active") if docs else None,
+        "by_subject": list(by_subject.values()),
+    }
+
+
+def clean_for_tts(text: str) -> str:
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"`{1,3}[^`]*`{1,3}", "", text)
+    # speech-prep: verbalize common math for natural Azerbaijani speech
+    text = re.sub(r"(\d+)\s*%", r"\1 faiz", text)
+    text = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1 bölü \2", text)
+    text = text.replace("×", " vur ").replace("÷", " bölü ").replace("=", " bərabərdir ").replace("°", " dərəcə ")
+    text = re.sub(r"[*_#>~|]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+@api_router.post("/tts")
+async def tts(req: TTSRequest):
+    text = clean_for_tts(req.text)[:4000]
+    if not text:
+        raise HTTPException(400, "Mətn boşdur")
+    speed = max(0.5, min(2.0, req.speed))
+    voice = req.voice if req.voice in ("coral", "nova") else "coral"
+    key = hashlib.sha256(f"{text}|{speed}|{voice}".encode()).hexdigest()
+    cached = await db.tts_cache.find_one({"key": key})
+    if cached and cached.get("storage_path"):
+        try:
+            audio = get_object(cached["storage_path"])
+            return Response(content=audio, media_type="audio/mpeg",
+                            headers={"Cache-Control": "public, max-age=31536000"})
+        except Exception:
+            pass
+    audio = None
+    try:
+        engine = OpenAITextToSpeech(api_key=EMERGENT_KEY)
+        audio = await engine.generate_speech(text=text, model="tts-1", voice=voice, speed=speed)
+    except Exception as e:
+        logger.error(f"TTS failed: {e}")
+        raise HTTPException(500, "Səs yaradıla bilmədi")
+    if not audio:
+        raise HTTPException(500, "Səs yaradıla bilmədi")
+    spath = f"{APP_NAME}/tts/{key}.mp3"
+    try:
+        put_object(spath, audio, "audio/mpeg")
+        await db.tts_cache.insert_one({"key": key, "storage_path": spath})
+    except Exception as e:
+        logger.error(f"TTS cache store failed: {e}")
+    return Response(content=audio, media_type="audio/mpeg",
+                    headers={"Cache-Control": "public, max-age=31536000"})
+
+
+SUBJECTS = [
+    {"id": "azdili", "name": "Azərbaycan dili", "icon": "BookText", "color": "#DC2626",
+     "description": "Ana dilimiz — səslər, sözlər, cümlələr və mətnlər.",
+     "topics": ["Səslər və hərflər", "Sözün tərkibi", "İsim", "Sifət", "Fel", "Cümlə üzvləri", "Mətn və nitq mədəniyyəti"]},
+    {"id": "riyaziyyat", "name": "Riyaziyyat", "icon": "Calculator", "color": "#2563EB",
+     "description": "Ədədlər, hesablamalar və həndəsə dünyası.",
+     "topics": ["Natural ədədlər", "Adi kəsrlər", "Onluq kəsrlər", "Faiz", "Həndəsi fiqurlar", "Ölçü vahidləri", "Sadə tənliklər"]},
+    {"id": "tebiet", "name": "Təbiət", "icon": "Leaf", "color": "#16A34A",
+     "description": "Canlılar, bitkilər, planetimiz və kainat.",
+     "topics": ["Canlılar aləmi", "Bitkilər", "Heyvanlar", "Su, hava və torpaq", "Günəş sistemi", "Ekologiya və təbiətin qorunması"]},
+    {"id": "informatika", "name": "İnformatika", "icon": "Laptop", "color": "#0891B2",
+     "description": "Kompüter, informasiya və təhlükəsiz internet.",
+     "topics": ["Kompüterin hissələri", "İnformasiya nədir", "Fayl və qovluqlar", "İnternet", "Təhlükəsizlik qaydaları", "Sadə alqoritmlər"]},
+    {"id": "ingilis", "name": "İngilis dili", "icon": "Languages", "color": "#7C3AED",
+     "description": "Learn English — words, phrases and fun.",
+     "topics": ["Alphabet and sounds", "Greetings", "Family members", "Numbers and colours", "Daily routine", "Animals and nature"]},
+    {"id": "tarix", "name": "Tarix", "icon": "Landmark", "color": "#B45309",
+     "description": "Keçmişimiz, qədim dövlətlər və mədəniyyət.",
+     "topics": ["Qədim insanlar", "İlk şəhərlər və dövlətlər", "Azərbaycanın qədim tarixi", "Tarixi abidələr", "Tarixi mənbələr"]},
+    {"id": "musiqi", "name": "Musiqi", "icon": "Music", "color": "#DB2777",
+     "description": "Səslər, notlar və Azərbaycan musiqisi.",
+     "topics": ["Musiqi səsləri", "Notlar", "Musiqi alətləri", "Azərbaycan xalq musiqisi", "Muğam", "Ritm və mahnı"]},
+    {"id": "tesviri", "name": "Təsviri incəsənət", "icon": "Palette", "color": "#EA580C",
+     "description": "Rənglər, rəsm və xalq sənəti.",
+     "topics": ["Rənglər aləmi", "Rəsm növləri", "Kompozisiya", "Milli naxışlar", "Xalça sənəti", "Heykəltəraşlıq"]},
+    {"id": "texnologiya", "name": "Texnologiya", "icon": "Wrench", "color": "#4B5563",
+     "description": "Əl işləri, materiallar və sağlam qida.",
+     "topics": ["Materiallar", "Əl işləri", "Qida və sağlamlıq", "Bitki becərmə", "Təhlükəsizlik qaydaları"]},
+    {"id": "fiziki", "name": "Fiziki tərbiyə", "icon": "Dumbbell", "color": "#059669",
+     "description": "Hərəkət, idman və sağlam həyat tərzi.",
+     "topics": ["Gimnastika", "Atletika", "İdman oyunları", "Sağlam həyat tərzi", "Bədən quruluşu"]},
+]
+
+
+async def seed_textbooks():
+    tb_id = "tb-riyaziyyat-5"
+    if await db.textbooks.find_one({"id": tb_id}):
+        return
+    tb = Textbook(id=tb_id, subject_id="riyaziyyat",
+                  title="Riyaziyyat 5 (nümunə struktur)", grade="5-ci sinif", provenance="SOURCE")
+    await db.textbooks.insert_one(tb.model_dump())
+    sections = [
+        Section(id="sec-natural", textbook_id=tb_id, order=1, title="Natural ədədlər"),
+        Section(id="sec-fractions", textbook_id=tb_id, order=2, title="Adi kəsrlər"),
+    ]
+    for s in sections:
+        await db.sections.insert_one(s.model_dump())
+
+    def ph(type_, label):
+        # Placeholder only — NO fabricated textbook content. Real text will come from PDF ingestion.
+        return StructuredContent(type=type_, provenance="SOURCE",
+                                 text=f"[PLACEHOLDER — {label}. Real məzmun dərslik PDF-dən gələcək.]")
+
+    lessons = [
+        Lesson(id="les-natural-1", textbook_id=tb_id, section_id="sec-natural", order=1,
+               title="Natural ədədlərin oxunuşu və yazılışı",
+               content=[ph("explanation", "izah"), ph("definition", "tərif"), ph("rule", "qayda"),
+                        ph("worked_example", "həll olunmuş nümunə"), ph("task", "tapşırıq"),
+                        ph("problem", "məsələ"), ph("answer", "cavab")]),
+        Lesson(id="les-natural-2", textbook_id=tb_id, section_id="sec-natural", order=2,
+               title="Natural ədədlərin müqayisəsi",
+               content=[ph("explanation", "izah"), ph("definition", "tərif"),
+                        ph("worked_example", "həll olunmuş nümunə"), ph("task", "tapşırıq")]),
+        Lesson(id="les-fractions-1", textbook_id=tb_id, section_id="sec-fractions", order=1,
+               title="Kəsr anlayışı",
+               content=[ph("explanation", "izah"), ph("definition", "tərif"), ph("rule", "qayda"),
+                        ph("worked_example", "həll olunmuş nümunə"), ph("task", "tapşırıq"),
+                        ph("problem", "məsələ"), ph("answer", "cavab")]),
+        Lesson(id="les-fractions-2", textbook_id=tb_id, section_id="sec-fractions", order=2,
+               title="Kəsrlərin müqayisəsi",
+               content=[ph("explanation", "izah"), ph("worked_example", "həll olunmuş nümunə"),
+                        ph("task", "tapşırıq"), ph("answer", "cavab")]),
+    ]
+    for lesson in lessons:
+        await db.lessons.insert_one(lesson.model_dump())
+    logger.info("Riyaziyyat textbook foundation seeded")
+
+
+@app.on_event("startup")
+async def startup():
+    try:
+        init_storage()
+        logger.info("Storage initialized")
+    except Exception as e:
+        logger.error(f"Storage init failed: {e}")
+    await db.books.delete_many({"is_sample": True})
+    await db.textbooks.delete_many({"id": "tb-riyaziyyat-5"})
+    await db.sections.delete_many({"textbook_id": "tb-riyaziyyat-5"})
+    await db.lessons.delete_many({"textbook_id": "tb-riyaziyyat-5"})
+    logger.info("Startup complete")
+
+
+app.include_router(api_router)
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
+
+========== SUBJECT VIEW ==========
+import { useEffect, useState } from "react";
+import * as Icons from "lucide-react";
+import { ArrowLeft, BookOpen, Volume2, Loader2 } from "lucide-react";
+
+const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+
+export const SubjectView = ({ t, subject, onBack, onLesson }) => {
+  const Icon = Icons[subject.icon] || BookOpen;
+  const [textbook, setTextbook] = useState(null);
+  const [sectionLessons, setSectionLessons] = useState({});
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await fetch(`${API}/textbooks/${subject.id}`);
+        const tbs = await res.json();
+        const tb = Array.isArray(tbs) && tbs.length ? tbs[0] : null;
+        if (!active) return;
+        setTextbook(tb);
+        if (tb) {
+          const map = {};
+          for (const sec of tb.sections) {
+            const lr = await fetch(`${API}/lessons/${tb.id}/${sec.id}`);
+            map[sec.id] = await lr.json();
+          }
+          if (active) setSectionLessons(map);
+        }
+      } catch (err) {
+        console.error("textbook load failed", err);
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [subject.id]);
+
+  const LessonBtn = ({ title, id, idx }) => (
+    <button data-testid={`lesson-card-${idx}`} onClick={() => onLesson({ id, title })}
+      className="rise text-left p-5 rounded-3xl bg-surface border-solid-2 hover:-translate-y-1 transition-transform flex items-center gap-4 w-full"
+      style={{ animationDelay: `${idx * 40}ms` }}>
+      <div className="w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 font-heading font-extrabold text-2xl"
+        style={{ background: subject.color, color: "#fff" }}>{idx + 1}</div>
+      <span className="font-heading font-bold text-xl leading-snug flex-1">{title}</span>
+      <Volume2 size={24} style={{ color: subject.color }} />
+    </button>
+  );
+
+  let flat = -1;
+
+  return (
+    <div className="max-w-5xl mx-auto px-4 py-8">
+      <div className="flex items-center gap-4 mb-10">
+        <button data-testid="subject-back-btn" onClick={onBack}
+          className="w-12 h-12 rounded-2xl bg-surface border-solid-2 flex items-center justify-center hover:bg-surface-2 transition-colors shrink-0">
+          <ArrowLeft size={26} />
+        </button>
+        <div className="w-16 h-16 rounded-2xl flex items-center justify-center shrink-0" style={{ background: subject.color, color: "#fff" }}>
+          <Icon size={34} />
+        </div>
+        <div className="min-w-0">
+          <h1 className="font-heading font-extrabold text-3xl sm:text-4xl leading-tight">{subject.name}</h1>
+          <p className="text-secondary text-lg">{subject.description}</p>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex justify-center py-16"><Loader2 size={38} className="animate-spin text-accent" /></div>
+      ) : textbook ? (
+        <div data-testid="textbook-view">
+          <div className="flex items-center gap-2 mb-6 flex-wrap">
+            <span className="px-3 py-1 rounded-full text-base font-bold text-white" style={{ background: subject.color }}>{textbook.title}</span>
+            <span className="text-secondary text-base font-semibold">{textbook.grade}</span>
+          </div>
+          <div className="space-y-8">
+            {textbook.sections.map((sec) => (
+              <div key={sec.id} data-testid={`section-${sec.id}`}>
+                <h2 className="font-heading font-bold text-2xl mb-4">{sec.title}</h2>
+                <div className="grid sm:grid-cols-2 gap-4">
+                  {(sectionLessons[sec.id] || []).map((les) => { flat += 1; return <LessonBtn key={les.id} title={les.title} id={les.id} idx={flat} />; })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <>
+          <h2 className="font-heading font-bold text-2xl mb-6">{t.chooseLesson}</h2>
+          <div className="grid sm:grid-cols-2 gap-4">
+            {subject.topics.map((topic, i) => <LessonBtn key={topic} title={topic} idx={i} />)}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+========== TUTOR CHAT ==========
+import { useState, useRef, useEffect, useCallback } from "react";
+import { ArrowLeft, Send, Mic, Volume2, Square, Loader2, GraduationCap, Sparkles, PencilLine, ListChecks, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
+import { useTTS } from "../hooks/useTTS";
+
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const API = `${BACKEND_URL}/api`;
+
+const Waveform = () => (
+  <div className="flex items-end gap-1 h-6">
+    {[0, 1, 2, 3, 4].map((i) => (
+      <span key={i} className="wave-bar w-1.5 bg-white rounded-full accent-fg"
+        style={{ background: "currentColor", animationDelay: `${i * 0.12}s`, height: "40%" }} />
+    ))}
+  </div>
+);
+
+export const TutorChat = ({ t, lang, ctx, speed, voice, onBack }) => {
+  const book = ctx.kind === "book" ? ctx.book : null;
+  const subject = ctx.kind === "lesson" ? ctx.subject : null;
+  const topic = ctx.kind === "lesson" ? ctx.topic : null;
+  const lessonId = ctx.kind === "lesson" ? ctx.lessonId : null;
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [stage, setStage] = useState(null);
+  const [retryAction, setRetryAction] = useState(null);
+  const { speak, stop, speakingId, loading } = useTTS(lang, speed, voice);
+  const scrollRef = useRef(null);
+  const recRef = useRef(null);
+  const inputRef = useRef(null);
+  const autoSpokeRef = useRef(false);
+
+  const scrollDown = () => setTimeout(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }), 50);
+
+  const qs = () => {
+    const p = new URLSearchParams();
+    if (book) p.set("book_id", book.id);
+    if (subject) { p.set("subject", subject); p.set("topic", topic); }
+    return p.toString();
+  };
+
+  const readStream = async (res, aiId) => {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "", full = "", error = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop();
+      for (const p of parts) {
+        const line = p.replace(/^data: /, "").trim();
+        if (!line) continue;
+        try {
+          const obj = JSON.parse(line);
+          if (obj.delta) {
+            full += obj.delta;
+            setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: full } : x)));
+            scrollDown();
+          } else if (obj.error) {
+            error = true;
+          }
+        } catch (err) { console.warn("SSE parse skipped", err); }
+      }
+    }
+    return { full, error };
+  };
+
+  const runAssistant = async (body, seedId, retryFn) => {
+    const aiId = seedId || `a${Date.now()}`;
+    setMessages((m) => (seedId ? [{ role: "assistant", content: "", id: aiId }] : [...m, { role: "assistant", content: "", id: aiId }]));
+    setStreaming(true);
+    setRetryAction(null);
+    scrollDown();
+    let result = { full: "", error: false };
+    try {
+      const res = await fetch(`${API}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error("http " + res.status);
+      result = await readStream(res, aiId);
+    } catch (err) {
+      console.error("assistant error", err);
+      result.error = true;
+    } finally { setStreaming(false); scrollDown(); }
+    if (result.error || !result.full.trim()) {
+      setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: "", error: true } : x)));
+      setRetryAction(() => (retryFn || (() => runAssistant(body, seedId, retryFn))));
+      return false;
+    }
+    speak(result.full, aiId);
+    return true;
+  };
+
+  const streamExplain = async () => {
+    const ok = await runAssistant({ subject, topic, lang, explain: true, lesson_id: lessonId }, "explain", streamExplain);
+    if (ok) setStage("explained");
+  };
+
+  const startRecall = () => { setStage("recall_input"); inputRef.current?.focus(); };
+
+  const startQuiz = async () => {
+    setStage("quiz");
+    await runAssistant({ subject, topic, lang, stage: "quiz_next", lesson_id: lessonId }, undefined, startQuiz);
+  };
+
+  const initRef = useRef(null);
+  useEffect(() => {
+    const key = `${book?.id || ""}|${subject || ""}|${topic || ""}`;
+    if (initRef.current === key) return;
+    initRef.current = key;
+    const load = async () => {
+      if (subject && topic) { streamExplain(); return; }
+      let hist = [];
+      try {
+        const res = await fetch(`${API}/messages?${qs()}`);
+        hist = await res.json();
+      } catch (err) { console.error("Failed to load messages", err); }
+      if (hist.length > 0) { setMessages(hist); scrollDown(); return; }
+      if (book) {
+        setMessages([{ role: "assistant", content: book.explanation, id: "intro" }]);
+        scrollDown();
+      } else {
+        setMessages([{ role: "assistant", content: t.welcome, id: "intro" }]);
+        scrollDown();
+      }
+    };
+    load();
+    // eslint-disable-next-line
+  }, [book?.id, subject, topic]);
+
+  const send = useCallback(async (text) => {
+    const msg = (text ?? input).trim();
+    if (!msg || streaming) return;
+    stop();
+    setInput("");
+    setRetryAction(null);
+    const effStage = subject && topic
+      ? (stage === "recall_input" ? "recall" : stage === "quiz" ? "quiz_answer" : undefined)
+      : undefined;
+    const userMsg = { role: "user", content: msg, id: `u${Date.now()}` };
+    const aiId = `a${Date.now()}`;
+    setMessages((m) => [...m, userMsg, { role: "assistant", content: "", id: aiId }]);
+    setStreaming(true);
+    scrollDown();
+    const body = { book_id: book?.id || null, subject, topic, message: msg, lang, stage: effStage, lesson_id: lessonId };
+    let result = { full: "", error: false };
+    try {
+      const res = await fetch(`${API}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error("http " + res.status);
+      result = await readStream(res, aiId);
+    } catch (err) {
+      console.error("send error", err);
+      result.error = true;
+    } finally {
+      setStreaming(false);
+      scrollDown();
+    }
+    if (result.error || !result.full.trim()) {
+      setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: "", error: true } : x)));
+      setRetryAction(() => () => send(msg));
+      return;
+    }
+    speak(result.full, aiId);
+    if (effStage === "recall") setStage("recalled");
+  }, [input, streaming, book, subject, topic, lang, stage, speak, stop]);
+
+  const startMic = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { toast.error(t.micError); return; }
+    stop();
+    const rec = new SR();
+    rec.lang = lang === "az" ? "az-AZ" : "tr-TR";
+    rec.interimResults = false;
+    rec.onresult = (e) => { const txt = e.results[0][0].transcript; setInput(txt); send(txt); };
+    rec.onerror = () => { setListening(false); toast.error(t.micError); };
+    rec.onend = () => setListening(false);
+    recRef.current = rec;
+    setListening(true);
+    rec.start();
+  };
+  const stopMic = () => { recRef.current?.stop(); setListening(false); };
+
+  const quicks = [t.q1, t.q2, t.q3];
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 py-6 flex flex-col" style={{ height: "calc(100vh - 76px)" }}>
+      {/* Header */}
+      <div className="flex items-center gap-4 mb-4">
+        <button data-testid="chat-back-btn" onClick={onBack}
+          className="w-12 h-12 rounded-2xl bg-surface border-solid-2 flex items-center justify-center hover:bg-surface-2 transition-colors shrink-0">
+          <ArrowLeft size={26} />
+        </button>
+        <div className="w-14 h-14 rounded-2xl bg-accent flex items-center justify-center shrink-0" style={{ color: "#fff" }}>
+          <GraduationCap size={30} className="accent-fg" />
+        </div>
+        <div className="min-w-0">
+          <h2 className="font-heading font-bold text-2xl truncate">{topic || (book ? book.title : t.general)}</h2>
+          {subject && <p className="text-secondary text-base truncate">{subject}</p>}
+          {book?.key_topics?.length > 0 && (
+            <p className="text-secondary text-base truncate">{book.key_topics.join(" • ")}</p>
+          )}
+        </div>
+      </div>
+
+      {/* Messages */}
+      <div ref={scrollRef} data-testid="chat-messages" className="flex-1 overflow-y-auto space-y-4 pr-1 pb-2">
+        {messages.map((m) => (
+          <div key={m.id} className={`rise flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+            <div className={`max-w-[85%] rounded-3xl px-5 py-4 border-solid-2 ${m.role === "user" ? "bg-accent text-white accent-fg" : "bg-surface"}`}
+              style={m.role === "user" ? { borderColor: "var(--accent)" } : {}}>
+              {m.error ? (
+                <div data-testid="error-block">
+                  <p className="text-xl leading-relaxed">{t.errorMsg}</p>
+                  <button data-testid="retry-btn" onClick={() => { const fn = retryAction; setRetryAction(null); if (fn) fn(); }}
+                    className="mt-3 inline-flex items-center gap-2 h-11 px-4 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-bold text-lg hover:opacity-90 transition-opacity">
+                    <RefreshCw size={22} /> {t.retryBtn}
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <p className="text-xl whitespace-pre-wrap leading-relaxed">{m.content || (streaming ? t.thinking : "")}</p>
+                  {m.role === "assistant" && m.content && (
+                    <button data-testid={`listen-btn-${m.id}`} onClick={() => (speakingId === m.id ? stop() : speak(m.content, m.id))}
+                      className="mt-3 inline-flex items-center gap-2 h-11 px-4 rounded-2xl bg-surface-2 border-solid-2 font-bold text-lg hover:bg-accent hover:text-white transition-colors">
+                      {speakingId === m.id ? (loading ? <Loader2 size={22} className="animate-spin" /> : <Square size={20} />) : <Volume2 size={22} />}
+                      {speakingId === m.id ? t.stop : t.listen}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Stage controls (lessons only) */}
+      {subject && topic && stage && (
+        <div data-testid="stage-indicator" className="flex flex-wrap items-center gap-2 text-base font-semibold mt-3">
+          <span className={`px-3 py-1 rounded-full ${stage === "explained" ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>1. {t.stageExplain}</span>
+          <span className={`px-3 py-1 rounded-full ${(stage === "recall_input" || stage === "recalled") ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>2. {t.stageRecall}</span>
+          <span className={`px-3 py-1 rounded-full ${stage === "quiz" ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>3. {t.stageQuiz}</span>
+        </div>
+      )}
+      {subject && topic && !streaming && (stage === "explained" || stage === "recalled") && (
+        <div className="mt-3">
+          {stage === "explained" && (
+            <button data-testid="step-recall-btn" onClick={startRecall}
+              className="w-full h-14 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:opacity-90 transition-opacity">
+              <PencilLine size={24} /> {t.stepRecall}
+            </button>
+          )}
+          {stage === "recalled" && (
+            <button data-testid="step-quiz-btn" onClick={startQuiz}
+              className="w-full h-14 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:opacity-90 transition-opacity">
+              <ListChecks size={24} /> {t.stepQuiz}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Quick asks */}
+      <div className="flex flex-wrap gap-2 my-3">
+        {quicks.map((q, i) => (
+          <button key={q} data-testid={`quick-ask-${i}`} disabled={streaming} onClick={() => send(q)}
+            className="inline-flex items-center gap-2 h-11 px-4 rounded-full bg-surface border-solid-2 font-semibold text-base hover:bg-surface-2 transition-colors disabled:opacity-50">
+            <Sparkles size={18} className="text-accent" /> {q}
+          </button>
+        ))}
+      </div>
+
+      {/* Input */}
+      <div className="flex items-end gap-3">
+        <button data-testid="mic-btn" onClick={listening ? stopMic : startMic}
+          className={`w-16 h-16 rounded-2xl flex items-center justify-center shrink-0 border-solid-2 transition-colors ${listening ? "bg-accent-warm pulse-ring" : "bg-surface hover:bg-surface-2"}`}
+          style={listening ? { background: "var(--accent-warm)", color: "#fff" } : {}}>
+          {listening ? <Waveform /> : <Mic size={30} />}
+        </button>
+        <div className="flex-1 flex items-end gap-2 bg-surface border-solid-2 rounded-3xl p-2">
+          <textarea ref={inputRef} data-testid="chat-input" value={input} rows={1}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            placeholder={listening ? t.listening : (stage === "recall_input" ? t.recallHint : stage === "quiz" ? t.quizHint : t.askPlaceholder)}
+            className="flex-1 bg-transparent outline-none resize-none text-xl px-3 py-3 max-h-40" />
+          <button data-testid="send-btn" onClick={() => send()} disabled={streaming || !input.trim()}
+            className="w-14 h-14 rounded-2xl bg-accent flex items-center justify-center shrink-0 disabled:opacity-40 hover:opacity-90 transition-opacity" style={{ color: "#fff" }}>
+            {streaming ? <Loader2 size={26} className="animate-spin accent-fg" /> : <Send size={26} className="accent-fg" />}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+========== REQUIREMENTS ==========
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+ast_serialize==0.11.2
+attrs==26.1.0
+bcrypt==4.1.3
+black==26.5.1
+boto3==1.43.99
+botocore==1.43.99
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.5.0
+cryptography==50.0.1
+distro==1.9.0
+dnspython==2.8.0
+ecdsa==0.19.2
+email-validator==2.3.0
+emergentintegrations==0.2.1
+execnet==2.1.2
+fastapi==0.110.1
+fastuuid==0.14.0
+filelock==4.0.1
+flake8==7.3.0
+fonttools==4.66.1
+frozenlist==1.8.0
+fsspec==2026.9.0
+google-ai-generativelanguage==0.6.15
+google-api-core==2.33.0
+google-api-python-client==2.200.0
+google-auth==2.58.0
+google-auth-httplib2==0.4.2
+google-genai==2.25.0
+google-generativeai==0.8.6
+googleapis-common-protos==1.75.0
+grpcio==1.84.0
+grpcio-status==1.71.2
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httplib2==0.32.0
+httpx==0.28.1
+huggingface_hub==1.32.0
+idna==3.20
+importlib_metadata==9.0.1
+iniconfig==2.3.0
+isort==9.0.1
+Jinja2==3.1.6
+jiter==0.17.0
+jmespath==1.1.0
+jq==1.12.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+librt==0.15.0
+litellm @ https://customer-assets.emergentagent.com/internal-asset/library/litellm-1.80.0-py3-none-any.whl#sha256=adf398c513273de9341f61822296c6b2145f7f2dc4a69daf3ac04829f5bde3f8
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mccabe==0.7.0
+mdurl==0.1.2
+motor==3.3.1
+multidict==6.9.1
+mypy==2.3.1
+mypy_extensions==1.1.0
+numpy==2.4.6
+oauthlib==3.3.1
+openai==1.99.9
+packaging==26.3
+pandas==3.0.6
+passlib==1.7.4
+pathspec==1.1.1
+pillow==12.3.0
+platformdirs==4.11.12
+pluggy==1.6.0
+propcache==0.5.4
+proto-plus==1.28.2
+protobuf==5.29.6
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pycodestyle==2.14.0
+pycparser==3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+pyflakes==3.4.0
+Pygments==2.21.0
+PyJWT==2.14.0
+pymongo==4.6.3
+pyparsing==3.3.3
+pypdf==6.19.0
+pytest==9.1.1
+pytest-xdist==3.8.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+python-jose==3.5.0
+python-multipart==0.0.32
+pytokens==0.4.1
+PyYAML==6.0.3
+referencing==0.37.0
+regex==2026.9.10
+reportlab==5.0.1
+requests==2.34.2
+requests-oauthlib==2.0.0
+rich==15.0.0
+rpds-py==2026.6.3
+rsa==4.9.1
+s3transfer==0.19.2
+s5cmd==0.2.0
+shellingham==1.5.4
+six==1.17.0
+sniffio==1.3.1
+starlette==0.37.2
+stripe==14.4.1
+tenacity==9.1.4
+tiktoken==0.14.0
+tokenizers==0.23.2
+tqdm==4.70.1
+typer==0.27.2
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.4
+uritemplate==4.2.0
+urllib3==2.8.0
+uvicorn==0.25.0
+watchfiles==1.3.0
+websockets==16.1.1
+yarl==1.25.1
+zipp==4.1.0
+
+========== TEST RESULT ==========
+#====================================================================================================
+# START - Testing Protocol - DO NOT EDIT OR REMOVE THIS SECTION
+#====================================================================================================
+
+# THIS SECTION CONTAINS CRITICAL TESTING INSTRUCTIONS FOR BOTH AGENTS
+# BOTH MAIN_AGENT AND TESTING_AGENT MUST PRESERVE THIS ENTIRE BLOCK
+
+# Communication Protocol:
+# If the `testing_agent` is available, main agent should delegate all testing tasks to it.
+#
+# You have access to a file called `test_result.md`. This file contains the complete testing state
+# and history, and is the primary means of communication between main and the testing agent.
+#
+# Main and testing agents must follow this exact format to maintain testing data. 
+# The testing data must be entered in yaml format Below is the data structure:
+# 
+## user_problem_statement: {problem_statement}
+## backend:
+##   - task: "Task name"
+##     implemented: true
+##     working: true  # or false or "NA"
+##     file: "file_path.py"
+##     stuck_count: 0
+##     priority: "high"  # or "medium" or "low"
+##     needs_retesting: false
+##     status_history:
+##         -working: true  # or false or "NA"
+##         -agent: "main"  # or "testing" or "user"
+##         -comment: "Detailed comment about status"
+##
+## frontend:
+##   - task: "Task name"
+##     implemented: true
+##     working: true  # or false or "NA"
+##     file: "file_path.js"
+##     stuck_count: 0
+##     priority: "high"  # or "medium" or "low"
+##     needs_retesting: false
+##     status_history:
+##         -working: true  # or false or "NA"
+##         -agent: "main"  # or "testing" or "user"
+##         -comment: "Detailed comment about status"
+##
+## metadata:
+##   created_by: "main_agent"
+##   version: "1.0"
+##   test_sequence: 0
+##   run_ui: false
+##
+## test_plan:
+##   current_focus:
+##     - "Task name 1"
+##     - "Task name 2"
+##   stuck_tasks:
+##     - "Task name with persistent issues"
+##   test_all: false
+##   test_priority: "high_first"  # or "sequential" or "stuck_first"
+##
+## agent_communication:
+##     -agent: "main"  # or "testing" or "user"
+##     -message: "Communication message between agents"
+
+# Protocol Guidelines for Main agent
+#
+# 1. Update Test Result File Before Testing:
+#    - Main agent must always update the `test_result.md` file before calling the testing agent
+#    - Add implementation details to the status_history
+#    - Set `needs_retesting` to true for tasks that need testing
+#    - Update the `test_plan` section to guide testing priorities
+#    - Add a message to `agent_communication` explaining what you've done
+#
+# 2. Incorporate User Feedback:
+#    - When a user provides feedback that something is or isn't working, add this information to the relevant task's status_history
+#    - Update the working status based on user feedback
+#    - If a user reports an issue with a task that was marked as working, increment the stuck_count
+#    - Whenever user reports issue in the app, if we have testing agent and task_result.md file so find the appropriate task for that and append in status_history of that task to contain the user concern and problem as well 
+#
+# 3. Track Stuck Tasks:
+#    - Monitor which tasks have high stuck_count values or where you are fixing same issue again and again, analyze that when you read task_result.md
+#    - For persistent issues, use websearch tool to find solutions
+#    - Pay special attention to tasks in the stuck_tasks list
+#    - When you fix an issue with a stuck task, don't reset the stuck_count until the testing agent confirms it's working
+#
+# 4. Provide Context to Testing Agent:
+#    - When calling the testing agent, provide clear instructions about:
+#      - Which tasks need testing (reference the test_plan)
+#      - Any authentication details or configuration needed
+#      - Specific test scenarios to focus on
+#      - Any known issues or edge cases to verify
+#
+# 5. Call the testing agent with specific instructions referring to test_result.md
+#
+# IMPORTANT: Main agent must ALWAYS update test_result.md BEFORE calling the testing agent, as it relies on this file to understand what to test next.
+
+#====================================================================================================
+# END - Testing Protocol - DO NOT EDIT OR REMOVE THIS SECTION
+#====================================================================================================
+
+
+
+#====================================================================================================
+# Testing Data - Main Agent and testing sub agent both should log testing data below this section
+#====================================================================================================
+========== TEST REPORTS ==========
+----- test_reports/iteration_1.json -----
+{
+  "summary": "First-finish smoke pass for Ağıllı Müəllim MVP. Backend endpoints (books, chat SSE, tts, messages) and frontend flow (library -> book chat -> streamed answer, language toggle AZ/TR, theme + font accessibility controls) all verified via public URL. PDF upload not exercised (slow, ~60s, low-risk for first finish).",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "passed": [
+    "GET /api/books returns 4 seeded Azerbaijani books with id/title/subject/key_topics/explanation (200)",
+    "POST /api/chat streams SSE 'data: {delta}' chunks in Azerbaijani and terminates with {done:true}",
+    "POST /api/tts returns audio/mpeg (12.6KB, MP3 magic 0xFFF3) for Azerbaijani text (200)",
+    "GET /api/messages/general returns saved user+assistant history after chat",
+    "Frontend loads at REACT_APP_BACKEND_URL, hero + 4 book-card-{0..3} + general-chat-card + upload-input rendered",
+    "AccessibilityTopBar: lang-az-btn / lang-tr-btn switches UI language (TR renders 'Akıllı Öğretmen', 'Merhaba')",
+    "theme-amber-btn switches theme; font-increase-btn changes font size",
+    "Clicking book-card-0 opens TutorChat with book explanation and a Səsləndir (listen-btn) button visible",
+    "chat-input + send-btn dispatches user message; quick-ask-0..2 chips present; chat-back-btn present"
+  ],
+  "failed": [],
+  "action_items": [
+    "Optional: full-testing agent should exercise POST /api/books/upload with a real small PDF (skipped here due to ~60s latency) and verify newly-uploaded book appears in GET /api/books",
+    "Optional: verify listen-btn actually plays audio in browser (audio playback not asserted; TTS endpoint itself is confirmed working)"
+  ],
+  "success_rate": {"backend": "100% (4/4 tested endpoints)", "frontend": "100% (all primary flows)"},
+  "retest_needed": false,
+  "full_testing_deferred": true
+}
+----- test_reports/iteration_2.json -----
+{
+  "summary": "Iteration 2 (subject/curriculum restructure) tested end-to-end. Backend: 10/10 pytest cases pass — /api/subjects returns exactly 10 subjects with correct ids/topics (incl. Riyaziyyat > 'Adi kəsrlər'); /api/chat SSE streams for lesson-explain, lesson follow-up and general modes and persists history retrievable via /api/messages?subject=&topic=; /api/tts returns audio/mpeg; /api/books list works and unknown book -> 404. Frontend: brand 'Ağıllı Dərs' + subtitle 'Azərbaycan 5-ci sinif milli kurikulumu' visible, 10 subject-card-* rendered, Riyaziyyat opens SubjectView with 7 lesson-card-* + subject-back-btn, lesson-card-0 auto-streams explanation, listen-btn appears, chat header shows topic ('Natural ədədlər') + subject, chat-input+send-btn streams a contextual answer, chat-back-btn returns, AZ/TR toggle updates chrome, font A+ and theme-amber-btn work.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "i18n.js", "issue": "Key 'subjects' is duplicated in both az and tr dicts — the second definition ('Fənn' / 'Ders', singular label for a book badge) overrides the intended plural heading ('Fənlər' / 'Dersler'), so the subjects section heading on Home renders as 'Ders' / 'Fənn' instead of 'Dersler' / 'Fənlər'.", "selector": "Home h2 next to BookOpen icon", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_backend.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Rename duplicated i18n key: use `subjectsHeading: 'Fənlər' / 'Dersler'` for the Home section heading (Home.jsx line 48) and keep `subjects: 'Fənn' / 'Ders'` for the book badge label — or just rename one of them to avoid the JS object-literal key collision."
+  ],
+  "critical_code_review_comments": [
+    "i18n.js has a duplicated object key 'subjects' in both az and tr — ESLint would flag as no-dupe-keys.",
+    "In /api/chat, history is fetched with .to_list(20) then sliced to last 6 — fine but could push .limit(6).sort(-1) then reverse for efficiency (non-blocking).",
+    "backend/server.py MODEL_NAME='gemini-3.1-pro-preview' — verify this model id is valid on emergentintegrations; if invalid, chat would 500. Live tests confirmed streaming works, so it is valid today.",
+    "server.py startup deletes sample books every boot — intentional per spec ('no sample books seeded anymore'), OK."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend.py"],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% (all 12 flows verified)"},
+  "seed_data_creation": "None — chat persisted messages under session lesson-<md5('Riyaziyyat|Adi kəsrlər')> and lesson-<md5('Riyaziyyat|Natural ədədlər')> plus one 'general' session as a byproduct of tests; safe to leave.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base API = REACT_APP_BACKEND_URL + /api. Chat is SSE ('data: {json}'). Lesson sessions keyed by md5(subject|topic). Sample books are wiped on startup — /api/books returns []. PDF upload path exists but not exercised (slow LLM analysis, ~30-60s). Web Speech API mic unavailable headless — use typed input. Only known issue: duplicated 'subjects' key in i18n.js causing wrong plural heading on Home."
+}
+----- test_reports/iteration_3.json -----
+{
+  "summary": "Iteration 3 regression check after code-quality pass (MD5->SHA-256 session_key, TTS audio init hardening, catch-block logging, stable React keys). Backend: 12/12 pytest cases pass — /api/subjects (10 subjects), /api/chat SSE for explain/recall/quiz_next/quiz_answer with correct persistence, /api/messages returns lesson history under the NEW sha256-based session_key (chat & messages agree), /api/tts returns audio/mpeg (200) and 400 on empty, /api/progress aggregates total_questions/subjects_studied/lessons_started/by_subject, /api/books list + 404. Frontend Playwright: brand 'Ağıllı Dərs' + 'Fənlər' heading render, 10 subject cards, general-chat-card, upload-dropzone and parent-panel-btn present. Opening Riyaziyyat > Adi kəsrlər auto-streams the explanation, stage-indicator shows (1.İzah/2.Sən danış/3.Suallar), step-recall-btn appears, typing an answer via chat-input+send-btn is streamed and step-quiz-btn appears; clicking it starts the quiz. quick-ask-0..2 chips present, chat-back-btn returns. Parent Panel opens (parent-panel-btn), stat cards show correct values (Q=8, L=7, S=6 after test run) and per-subject list (parent-subject-* + lesson rows) renders — NO React duplicate-key warnings or console errors captured after the array-index->stable-id key change. AZ/TR toggle and font A-/A+ testids work.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_backend.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "session_key() correctly switched to hashlib.sha256(...).hexdigest()[:12] — chat writes and /api/messages reads use the same helper so lesson history is retrievable (verified end-to-end).",
+    "/api/tts: 'audio' is initialised to None before the try/except and re-checked afterwards; happy-path still returns audio/mpeg 200; a TTS-engine failure now yields a clean 500 'Səs yaradıla bilmədi' instead of a NameError.",
+    "TutorChat.readStream and message-load catches now log via console.warn/console.error (no more silently swallowed errors).",
+    "React list keys: SubjectView uses key={topic}, ParentPanel uses key={s.subject} and key={l.topic}, TutorChat quick-asks use key={q}. No duplicate-key warnings observed during full lesson+parent flow.",
+    "Minor (pre-existing, non-blocking): /api/chat still fetches history with .to_list(20) then slices last 8 — could push .sort(-1).limit(8) then reverse for efficiency.",
+    "Minor: theme/lang top-bar buttons do not expose data-testid for the individual theme buttons (only accessibility-topbar, font-decrease-btn, font-increase-btn, parent-panel-btn). If the review request lists 'theme buttons' as a testable target, adding data-testid=\"theme-{name}-btn\" and \"lang-{code}-btn\" would help future automation. Not a functional bug."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend.py"],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% (all requested regression flows verified)"},
+  "test_credentials": "N/A (no auth)",
+  "seed_data_creation": "Tests wrote lesson messages under sha256 session ids for Riyaziyyat > 'Adi kəsrlər' and 'Onluq kəsrlər', plus one 'general' session. Safe to leave; progress reflects them.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base API = REACT_APP_BACKEND_URL + /api. Chat is SSE ('data: {json}'). Lesson sessions now keyed by sha256(subject|topic)[:12]; MUST use the same helper on both write and read paths. Lesson stages: explain (resets history & streams), recall (persists user retell + streams correction), quiz_next (streams question, no user msg), quiz_answer (persists user answer + streams evaluation). /api/progress aggregates from db.progress upserts made in /api/chat. Sample books are wiped on startup. Web Speech mic unavailable headless — use typed input. Only cosmetic gap: theme/lang buttons lack per-button testids.",
+  "rca of the issue": "No issues found."
+}
+----- test_reports/iteration_4.json -----
+{
+  "summary": "Verified duplicate-TTS bug fix on Ağıllı Dərs. Instrumented Playwright to intercept all /api/tts and /api/chat requests while opening a fresh lesson (subject-card-informatika -> lesson-card-0). Auto-explanation produced EXACTLY 1 /api/tts call and 1 /api/chat call (previously 2 due to React.StrictMode). Regression flow (recall answer send, step-quiz start) also produced exactly 1 TTS + 1 chat per assistant message. Listen button toggle behaves correctly: because auto-explain sets speakingId on the assistant message, the first listen-btn click acts as stop (0 TTS), second click plays (1 TTS), third click stops (0 TTS) with no overlap. AZ home renders, chat-back-btn works, parent-panel-btn visible.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "useTTS.js: token guard correctly implemented — stop() bumps tokenRef; speak() aborts after fetch/blob when tokenRef changed. onended nulls audioRef only when it still owns the element. Good.",
+    "TutorChat.jsx: initRef keyed by book|subject|topic prevents StrictMode double-invocation of streamExplain(). Good. Minor: eslint-disable next-line at end of useEffect deps — acceptable given the intent to run only on lesson change.",
+    "Minor: initRef is a plain useRef and persists across component instance lifetime; if user re-opens same lesson after leaving TutorChat and returning, a new TutorChat instance is created so key check works — no issue."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (frontend-only)", "frontend": "100%"},
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Duplicate-TTS bug confirmed fixed. Measurement approach: page.on('request') filter /api/tts, clear list right BEFORE clicking lesson-card-0, wait for step-recall-btn plus 3-4s buffer to catch any delayed StrictMode duplicate. When testing listen-btn interactions, remember that the auto-explain speak() call sets speakingId on the assistant message, so the first click on listen-btn-<id> acts as stop().",
+  "rca of the issue": "React.StrictMode double-invoked the load useEffect in TutorChat, so streamExplain() ran twice, each completion calling speak(full, aiId) — resulting in 2 overlapping /api/tts fetches and 2 <audio> plays. Fix: (1) initRef guard keyed by book|subject|topic short-circuits the second invocation; (2) tokenRef guard in useTTS ensures only the latest speak() request creates/plays the audio element (any superseded request returns after fetch)."
+}
+----- test_reports/iteration_5.json -----
+{
+  "summary": "Verified the primary error-loop bug fix for Ağıllı Dərs plus retry/recovery, two-voice (coral/nova) persistence, speech-prep TTS, and regression paths. Backend: 10/10 pytest passing (subjects=10, SSE streaming, TTS speech-prep for '3/4 və 25%' returns 200 audio/mpeg, nova voice accepted, invalid voice falls back, empty text 400). Frontend Playwright with page.route interception on **/api/chat returning SSE 'data: {error:true}' showed: (a) error-block appears EXACTLY ONCE with retry-btn, (b) ZERO /api/tts requests on failure (silent — the error is NOT spoken), (c) no auto-retry/loop. Clicking retry-btn while still failing produced exactly 1 new /api/chat call. After removing interception, retry streamed real content with EXACTLY 1 /api/tts call (no duplicate). voice-nova-btn selection persists in localStorage across reload and is sent as voice='nova' in /api/tts body. Parent panel and AZ/TR language toggle work.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_backend.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py gen(): on exception or empty output emits {error:true}+{done:true} and returns WITHOUT persisting assistant message — correct, prevents the error from being saved and later replayed.",
+    "TutorChat.readStream returns {full,error}; both runAssistant and send() set message.error and setRetryAction then skip speak() — the critical fix. speak() is ONLY invoked on success path.",
+    "retry-btn onClick captures retryAction then nulls it before invoking (prevents double-click accidental double-fire). Good.",
+    "useTTS tokenRef guard still intact — overlapping/stale speak() calls cannot create audio.",
+    "server.py line 331: after yielding error+done the function returns; subsequent yield for done is skipped — correct behavior."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend.py"],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% (all critical assertions)"},
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Use page.route('**/api/chat', fulfill with text/event-stream body 'data: {\"error\": true}\\n\\ndata: {\"done\": true}\\n\\n') to simulate failure. Count /api/tts POST requests across page.on('request') — must be 0 during the failed turn. Clear counters BEFORE clicking lesson-card-0. After unroute+retry, allow ~3-4s buffer post step-recall-btn to catch any delayed duplicate TTS.",
+  "rca of the issue": "Fixed. Original bug: backend injected an apology text 'Bağışla problem oldu, yenidən cəhd et' into the SSE stream on exception and persisted it; frontend treated it as a normal assistant message and auto-spoke it; the message was reloaded on reopen which recreated the loop. Fix: (1) backend emits {error:true}+{done:true} and does NOT persist; (2) frontend readStream returns {full,error}; on error renders error-block with retry-btn and NEVER calls speak(); (3) retry only fires on explicit user click. Verified end-to-end."
+}
