@@ -37,8 +37,8 @@ export const SubjectView = ({ t, subject, onBack, onLesson }) => {
     return () => { active = false; };
   }, [subject.id]);
 
-  const LessonBtn = ({ title, idx }) => (
-    <button data-testid={`lesson-card-${idx}`} onClick={() => onLesson(title)}
+  const LessonBtn = ({ title, id, idx }) => (
+    <button data-testid={`lesson-card-${idx}`} onClick={() => onLesson({ id, title })}
       className="rise text-left p-5 rounded-3xl bg-surface border-solid-2 hover:-translate-y-1 transition-transform flex items-center gap-4 w-full"
       style={{ animationDelay: `${idx * 40}ms` }}>
       <div className="w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 font-heading font-extrabold text-2xl"
@@ -79,7 +79,7 @@ export const SubjectView = ({ t, subject, onBack, onLesson }) => {
               <div key={sec.id} data-testid={`section-${sec.id}`}>
                 <h2 className="font-heading font-bold text-2xl mb-4">{sec.title}</h2>
                 <div className="grid sm:grid-cols-2 gap-4">
-                  {(sectionLessons[sec.id] || []).map((les) => { flat += 1; return <LessonBtn key={les.id} title={les.title} idx={flat} />; })}
+                  {(sectionLessons[sec.id] || []).map((les) => { flat += 1; return <LessonBtn key={les.id} title={les.title} id={les.id} idx={flat} />; })}
                 </div>
               </div>
             ))}

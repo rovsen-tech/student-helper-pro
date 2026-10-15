@@ -19,6 +19,11 @@ function App() {
   const [fontStep, setFontStep] = useState(0);
   const [speed, setSpeed] = useState(1.0);
   const [voice, setVoice] = useState(() => localStorage.getItem("voice") || "coral");
+  const [sid] = useState(() => {
+    let s = localStorage.getItem("sid");
+    if (!s) { s = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)); localStorage.setItem("sid", s); }
+    return s;
+  });
   const [books, setBooks] = useState([]);
   const [subjects, setSubjects] = useState([]);
   const [view, setView] = useState({ type: "home" });
@@ -47,13 +52,13 @@ function App() {
       {view.type === "home" && (
         <Home t={t} lang={lang} subjects={subjects} books={books}
           onSubject={(s) => setView({ type: "subject", subject: s })}
-          onChat={(ctx) => setView({ type: "chat", ctx, from: { type: "home" } })}
+          onChat={(ctx) => setView({ type: "chat", ctx: { ...ctx, sid }, from: { type: "home" } })}
           onUploaded={loadBooks} />
       )}
       {view.type === "subject" && (
         <SubjectView t={t} subject={view.subject}
           onBack={() => setView({ type: "home" })}
-          onLesson={(topic) => setView({ type: "chat", ctx: { kind: "lesson", subject: view.subject.name, topic }, from: { type: "subject", subject: view.subject } })} />
+          onLesson={(lesson) => setView({ type: "chat", ctx: { kind: "lesson", subject: view.subject.name, topic: lesson.title, lessonId: lesson.id || null, sid }, from: { type: "subject", subject: view.subject } })} />
       )}
       {view.type === "chat" && (
         <TutorChat t={t} lang={lang} ctx={view.ctx} speed={speed} voice={voice}

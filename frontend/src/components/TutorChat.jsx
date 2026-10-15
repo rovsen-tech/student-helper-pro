@@ -19,6 +19,8 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack }) => {
   const book = ctx.kind === "book" ? ctx.book : null;
   const subject = ctx.kind === "lesson" ? ctx.subject : null;
   const topic = ctx.kind === "lesson" ? ctx.topic : null;
+  const lessonId = ctx.kind === "lesson" ? ctx.lessonId : null;
+  const sid = ctx.sid;
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -35,6 +37,7 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack }) => {
 
   const qs = () => {
     const p = new URLSearchParams();
+    if (sid) p.set("student_id", sid);
     if (book) p.set("book_id", book.id);
     if (subject) { p.set("subject", subject); p.set("topic", topic); }
     return p.toString();
@@ -97,7 +100,7 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack }) => {
   };
 
   const streamExplain = async () => {
-    const ok = await runAssistant({ subject, topic, lang, explain: true }, "explain", streamExplain);
+    const ok = await runAssistant({ subject, topic, lang, explain: true, lesson_id: lessonId, student_id: sid }, "explain", streamExplain);
     if (ok) setStage("explained");
   };
 
@@ -105,7 +108,7 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack }) => {
 
   const startQuiz = async () => {
     setStage("quiz");
-    await runAssistant({ subject, topic, lang, stage: "quiz_next" }, undefined, startQuiz);
+    await runAssistant({ subject, topic, lang, stage: "quiz_next", lesson_id: lessonId, student_id: sid }, undefined, startQuiz);
   };
 
   const initRef = useRef(null);
@@ -114,13 +117,18 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack }) => {
     if (initRef.current === key) return;
     initRef.current = key;
     const load = async () => {
-      if (subject && topic) { streamExplain(); return; }
       let hist = [];
       try {
         const res = await fetch(`${API}/messages?${qs()}`);
         hist = await res.json();
       } catch (err) { console.error("Failed to load messages", err); }
-      if (hist.length > 0) { setMessages(hist); scrollDown(); return; }
+      if (hist.length > 0) {
+        setMessages(hist);
+        if (subject && topic) setStage("explained");
+        scrollDown();
+        return;
+      }
+      if (subject && topic) { streamExplain(); return; }
       if (book) {
         setMessages([{ role: "assistant", content: book.explanation, id: "intro" }]);
         scrollDown();
@@ -147,7 +155,7 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack }) => {
     setMessages((m) => [...m, userMsg, { role: "assistant", content: "", id: aiId }]);
     setStreaming(true);
     scrollDown();
-    const body = { book_id: book?.id || null, subject, topic, message: msg, lang, stage: effStage };
+    const body = { book_id: book?.id || null, subject, topic, message: msg, lang, stage: effStage, lesson_id: lessonId, student_id: sid };
     let result = { full: "", error: false };
     try {
       const res = await fetch(`${API}/chat`, {

@@ -95,13 +95,19 @@ class Book(BaseModel):
 
 
 PROVENANCE = ("SOURCE", "DERIVED", "GENERATED")
-CONTENT_TYPES = ("explanation", "definition", "rule", "worked_example", "task", "problem", "answer")
+CONTENT_TYPES = ("explanation", "definition", "rule", "worked_example", "task",
+                 "problem", "answer", "investigation", "think", "note", "summary", "glossary")
 
 
 class StructuredContent(BaseModel):
     type: str          # one of CONTENT_TYPES
     provenance: str = "SOURCE"   # one of PROVENANCE
     text: str
+    normalized_text: str = ""
+    original_text: str = ""
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    source_page: Optional[int] = None
 
 
 class Lesson(BaseModel):
@@ -109,7 +115,10 @@ class Lesson(BaseModel):
     textbook_id: str
     section_id: str
     order: int = 0
+    number: str = ""
     title: str
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
     content: List[StructuredContent] = []
 
 
@@ -137,14 +146,17 @@ class ChatRequest(BaseModel):
     lang: str = "az"
     explain: bool = False
     stage: Optional[str] = None
+    lesson_id: Optional[str] = None
+    student_id: Optional[str] = None
 
 
-def session_key(book_id=None, subject=None, topic=None):
+def session_key(book_id=None, subject=None, topic=None, student_id=None):
+    sid = (student_id or "anon")
     if book_id:
-        return f"book-{book_id}"
+        return f"{sid}-book-{book_id}"
     if subject and topic:
-        return "lesson-" + hashlib.sha256(f"{subject}|{topic}".encode()).hexdigest()[:12]
-    return "general"
+        return f"{sid}-lesson-" + hashlib.sha256(f"{subject}|{topic}".encode()).hexdigest()[:12]
+    return f"{sid}-general"
 
 
 async def record_activity(subject, topic, is_question):
@@ -164,7 +176,7 @@ class TTSRequest(BaseModel):
     voice: str = "coral"
 
 
-def tutor_system_message(lang: str, book=None, subject=None, topic=None) -> str:
+def tutor_system_message(lang: str, book=None, subject=None, topic=None, lesson_source=None) -> str:
     lang_name = "Azərbaycan dilində" if lang == "az" else "Türkçe"
     base = (
         f"Sən 'Ağıllı Müəllim' adlı diqqətli, səbirli və mehriban şəxsi müəllimsən — sadəcə chatbot deyilsən. "
@@ -186,6 +198,11 @@ def tutor_system_message(lang: str, book=None, subject=None, topic=None) -> str:
         base += f"\n\nHazırkı fənn: {subject}."
         if topic:
             base += f" Mövzu: «{topic}». Cavablarını bu fənn və mövzu ətrafında saxla."
+    if lesson_source:
+        base += (
+            "\n\nDƏRSLİK MƏNBƏYİ (ƏSAS HƏQİQƏT — yalnız buna əsaslan, kənardan məlumat və ya "
+            "səhifə nömrəsi uydurma):\n" + lesson_source[:3500]
+        )
     if book:
         base += (
             f"\n\nHazırda bu dərsliyi öyrənirsiniz:\nBaşlıq: {book.get('title','')}\n"
@@ -315,14 +332,25 @@ async def chat_stream(req: ChatRequest):
     book = None
     if req.book_id:
         book = await db.books.find_one({"id": req.book_id})
-    session_id = session_key(req.book_id, req.subject, req.topic)
-    sysmsg = tutor_system_message(req.lang, book, req.subject, req.topic)
+    session_id = session_key(req.book_id, req.subject, req.topic, req.student_id)
+    lesson_source = None
+    if req.lesson_id:
+        ldoc = await db.lessons.find_one({"id": req.lesson_id})
+        if ldoc:
+            parts = []
+            for c in ldoc.get("content", []):
+                if c.get("provenance") == "SOURCE" and c.get("type") != "answer":
+                    parts.append(c.get("normalized_text") or c.get("text", ""))
+            pref = ""
+            if ldoc.get("page_start"):
+                pref = f"(səhifə {ldoc['page_start']}-{ldoc.get('page_end', ldoc['page_start'])}) "
+            lesson_source = pref + "\n".join(p for p in parts if p)
+    sysmsg = tutor_system_message(req.lang, book, req.subject, req.topic, lesson_source)
 
     history = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(20)
     chat = make_chat(session_id, sysmsg)
 
     if req.explain:
-        await db.messages.delete_many({"session_id": session_id})
         user_text = (f"«{req.topic}» mövzusunu 5-ci sinif şagirdinə uyğun, maraqlı və sadə "
                      f"şəkildə, gündəlik nümunələrlə izah et. Qısa və aydın saxla. "
                      f"Sonda şagirdə de ki, indi növbə onundur və bu mövzunu öz sözləri ilə danışmalıdır.")
@@ -398,8 +426,8 @@ async def chat_stream(req: ChatRequest):
 
 
 @api_router.get("/messages")
-async def get_messages(book_id: str = None, subject: str = None, topic: str = None):
-    session_id = session_key(book_id, subject, topic)
+async def get_messages(book_id: str = None, subject: str = None, topic: str = None, student_id: str = None):
+    session_id = session_key(book_id, subject, topic, student_id)
     docs = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(200)
     return [{"role": d["role"], "content": d["content"], "id": d["id"]} for d in docs]
 
@@ -559,7 +587,9 @@ async def startup():
     except Exception as e:
         logger.error(f"Storage init failed: {e}")
     await db.books.delete_many({"is_sample": True})
-    await seed_textbooks()
+    await db.textbooks.delete_many({"id": "tb-riyaziyyat-5"})
+    await db.sections.delete_many({"textbook_id": "tb-riyaziyyat-5"})
+    await db.lessons.delete_many({"textbook_id": "tb-riyaziyyat-5"})
     logger.info("Startup complete")
 
 
