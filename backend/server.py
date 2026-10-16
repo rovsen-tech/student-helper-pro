@@ -154,6 +154,13 @@ def tutor_system_message(lang: str, book=None, subject=None, topic=None) -> str:
         f"Cavab düzgün olarsa, konkret olaraq nəyi yaxşı etdiyini qısa təriflə və dərsi davam etdir. "
         f"Hər mesajdan sonra süni təriflər söyləmə; tərifin həmişə səmimi və konkret olsun. "
         f"Dərs sessiyasının sonunda bu gün öyrənilənləri qısa şəkildə yekunlaşdır. "
+        f"Şagird dərsi bitirdiyini bildirəndə (məsələn, «bitdi», «başa çatdı», «qurtardı», "
+        f"«bye», «sağ ol» və ya eyni mənalı ifadələr işlədəndə) və ya sən dərsin tamamlandığını "
+        f"bildirəndə, adi dərs sualı vermək əvəzinə söhbəti isti şəkildə yekunlaşdır. 2-3 cümlə ilə "
+        f"bu gün keçilənləri xülasə et, söhbətdə şagirdin həqiqətən yaxşı etdiyi konkret bir şeyi "
+        f"qeyd et və hazırkı fənn kontekstinə uyğun növbəti öyrəniləcək şeyi söylə. Fənn və mövzu "
+        f"məlumatından istifadə et, fənn adı uydurma; konkret növbəti mövzu məlum deyilsə, həmin "
+        f"fənn üzrə növbəti dərsə keçəcəyinizi bildir. "
         f"Həmişə mehriban, ruhlandırıcı və səbirli ol."
     )
     if subject:
