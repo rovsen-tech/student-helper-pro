@@ -476,7 +476,6 @@ async def startup():
         logger.info("Storage initialized")
     except Exception as e:
         logger.error(f"Storage init failed: {e}")
-    await db.books.delete_many({"is_sample": True})
     logger.info("Startup complete")
 
 
