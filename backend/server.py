@@ -136,13 +136,17 @@ def tutor_system_message(lang: str, book=None, subject=None, topic=None) -> str:
         f"HƏMİŞƏ {lang_name} dilində danış. 10-11 yaşlı, 5-ci sinif şagirdinə uyğun sadə sözlər "
         f"və qısa cümlələr işlət. Şagirdin gözləri zəifdir: aydın danış, yalnız şəkilə və ya "
         f"diaqrama baxmağı tələb edən ifadələr işlətmə. "
-        f"Dərsin mövzusunu əvvəlcə anlaşıqlı və addım-addım izah et. Hər addımda bir əsas fikrə "
+        f"Dərsin izahına başladıqdan sonra mövzunu anlaşıqlı və addım-addım izah et. Hər addımda bir əsas fikrə "
         f"diqqət yetir, izahı kiçik hissələrə böl və uzun monoloqlardan qaç. Mövzunu yalnız "
         f"dərslik nümunələri ilə məhdudlaşdırma: gündəlik həyatdan tanış və real nümunələr gətir. "
         f"Riyaziyyatı dəqiq, dünya səviyyəli anlayışlarla izah et və şagirdin başa düşməsinə "
         f"kömək edəcəksə, dərslikdən kənar uyğun bilik də ver. "
-        f"İlkin izahdan sonra başa düşüb-düşmədiyini yoxlamaq üçün BİR qısa sual ver və cavabını "
-        f"gözlə. Şagirdi tələsdirmə və cavabı onun əvəzinə vermə. "
+        f"Yeni dərs başlayanda mövzunun adını çəkərək şagirdi mehriban salamla, bu gün nə "
+        f"öyrənəcəyinizi 1-2 cümlə ilə de və əvvəlki biliklərini yoxlamaq üçün BİR sadə sual ver. "
+        f"Sualı verdikdən sonra dayan və şagirdin cavabını gözlə; bu ilk cavabda mövzunu izah etmə. "
+        f"Şagird cavab verdikdən sonra izaha başla. Sonrakı izahdan sonra da başa düşüb-düşmədiyini "
+        f"yoxlamaq üçün BİR qısa sual ver və cavabını gözlə. Şagirdi tələsdirmə və cavabı onun "
+        f"əvəzinə vermə. "
         f"Şagird səhv cavab verərsə, 'səhvdir' demə və düzgün cavabı dərhal açıqlama. Əvvəlcə "
         f"cavabında düzgün və ya yaxşı olan bir məqamı səmimi şəkildə qeyd et, sonra onu cavaba "
         f"yaxınlaşdıran bir istiqamətləndirici sual ver. Əgər yenə səhv cavab verərsə, izah "
@@ -270,11 +274,23 @@ async def chat_stream(req: ChatRequest):
 
     if req.explain:
         await db.messages.delete_many({"session_id": session_id})
-        user_text = (f"«{req.topic}» mövzusunu 5-ci sinif şagirdinə uyğun, maraqlı və sadə "
-                     f"şəkildə, addım-addım və gündəlik nümunələrlə tam izah et. "
-                     f"Mövzunu kiçik hissələrə böl, vacib addımları və onların səbəbini göstər; "
-                     f"izahı qısa və ya yarımçıq saxlama. "
-                     f"Sonda şagirdə de ki, indi növbə onundur və bu mövzunu öz sözləri ilə danışmalıdır.")
+        user_text = (f"Yeni dərs başlayır. Fənn: «{req.subject}». Bugünkü mövzu: «{req.topic}». "
+                     f"Şagirdi bu mövzunun adı ilə mehriban salamla. 1-2 cümlə ilə bu gün nə "
+                     f"öyrənəcəyinizi söylə, sonra əvvəlki biliklərini yoxlamaq üçün mövzuya uyğun "
+                     f"BİR sadə diaqnostik sual ver. Mövzunu hələ izah etmə, suala cavab və ya "
+                     f"ipucu vermə; sualdan sonra dayan və şagirdin cavabını gözlə. "
+                     f"Cavabından sonra izaha başlayacaqsan.")
+    elif (req.subject and req.topic and len(history) == 1
+          and history[0].get("role") == "assistant"):
+        if req.message:
+            await db.messages.insert_one({
+                "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
+                "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        user_text = (f"Şagird cavab verdi: «{req.message}». Bu, onun cavablandırdığı ilk "
+                     f"diaqnostik sualdır. Cavabını nəzərə al və dərsi davam etdir: mövzunu "
+                     f"şagirdin əvvəlki biliklərinə uyğun, sadə addımlarla və gündəlik nümunələrlə "
+                     f"öyrət. Cavabına uyğun mehriban reaksiya ver; ilkin sualı təkrarlama.")
     elif req.stage == "recall":
         if req.message:
             await db.messages.insert_one({
