@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { ArrowLeft, Send, Mic, Volume2, Square, Loader2, GraduationCap, Sparkles, PencilLine, ListChecks } from "lucide-react";
 import { toast } from "sonner";
 import { useTTS } from "../hooks/useTTS";
+import { SmartNotes } from "./SmartNotes";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -31,6 +32,34 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
   const micTranscriptRef = useRef("");
   const inputRef = useRef(null);
   const autoSpokeRef = useRef(false);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notesData, setNotesData] = useState(null);
+  const [notesLoading, setNotesLoading] = useState(false);
+
+  const generateNotes = async () => {
+    setNotesOpen(true);
+    setNotesLoading(true);
+    try {
+      const conversation = messages
+        .filter((m) => m?.content)
+        .slice(-100)
+        .map((m) => ({ role: m.role, content: String(m.content).slice(0, 8000) }));
+      const res = await fetch(`${BACKEND_URL}/api/notes/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lesson_id: book?.id || (subject && topic ? `${subject}|${topic}` : null),
+          subject, topic, lang: "az", exam_mode: false, conversation,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setNotesData(await res.json());
+    } catch (err) {
+      console.error("Notes failed", err);
+      toast.error("Qeydlər hazırlana bilmədi");
+      setNotesOpen(false);
+    } finally { setNotesLoading(false); }
+  };
 
   const scrollDown = () => setTimeout(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }), 50);
 
@@ -228,6 +257,10 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
             <p className="text-secondary text-base truncate">{book.key_topics.join(" • ")}</p>
           )}
         </div>
+        <button data-testid="notes-btn" onClick={generateNotes} disabled={streaming || notesLoading}
+          className="ml-auto h-12 px-4 rounded-2xl bg-surface border-solid-2 font-bold text-lg hover:bg-surface-2 transition-colors shrink-0 disabled:opacity-50">
+          📝 Qeydlər
+        </button>
       </div>
 
       {/* Messages */}
@@ -248,6 +281,12 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
           </div>
         ))}
       </div>
+
+      {notesOpen && (
+        <div className="mt-3 max-h-80 overflow-y-auto">
+          <SmartNotes notes={notesData} loading={notesLoading} onClose={() => setNotesOpen(false)} />
+        </div>
+      )}
 
       {/* Stage controls (lessons only) */}
       {subject && topic && stage && (

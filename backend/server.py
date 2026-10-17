@@ -10,8 +10,8 @@ import hashlib
 import logging
 import tempfile
 from pathlib import Path
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Literal, Optional
 import uuid
 from datetime import datetime, timezone
 
@@ -20,6 +20,8 @@ from emergentintegrations.llm.chat import (
     LlmChat, UserMessage, FileContentWithMimeType, TextDelta, StreamDone,
 )
 from emergentintegrations.llm.openai import OpenAITextToSpeech
+
+from smart_notes import generate_smart_notes
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -433,6 +435,36 @@ async def tts(req: TTSRequest):
         logger.error(f"TTS cache store failed: {e}")
     return Response(content=audio, media_type="audio/mpeg",
                     headers={"Cache-Control": "public, max-age=31536000"})
+
+
+# ---- Smart Notes (ekstraktiv, sıfır xərcli, MongoDB-yə YAZMIR) ----
+class SmartNotesMessage(BaseModel):
+    role: str = Field(default="assistant", max_length=20)
+    content: str = Field(default="", max_length=8000)
+
+
+class SmartNotesRequest(BaseModel):
+    lesson_id: Optional[str] = Field(default=None, max_length=200)
+    subject: Optional[str] = Field(default=None, max_length=200)
+    topic: Optional[str] = Field(default=None, max_length=200)
+    lang: Literal["az", "en"] = "az"
+    exam_mode: bool = False
+    conversation: List[SmartNotesMessage] = Field(default_factory=list, max_length=100)
+
+    @field_validator("lang", mode="before")
+    @classmethod
+    def normalize_lang(cls, v):
+        return v if v in ("az", "en") else "az"
+
+
+@api_router.post("/notes/generate")
+def generate_notes(req: SmartNotesRequest):
+    notes = generate_smart_notes(
+        [m.model_dump() for m in req.conversation],
+        subject=req.subject, topic=req.topic, lang=req.lang, exam_mode=req.exam_mode,
+    )
+    notes["lesson_id"] = req.lesson_id
+    return notes
 
 
 SUBJECTS = [
