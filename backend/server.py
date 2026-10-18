@@ -7,6 +7,8 @@ import os
 import re
 import json
 import hashlib
+import hmac
+import secrets
 import logging
 import tempfile
 from pathlib import Path
@@ -24,6 +26,7 @@ from emergentintegrations.llm.openai import OpenAITextToSpeech
 from smart_notes import generate_smart_notes
 import quiz_engine
 import progress_manager
+from curriculum import get_topic_info
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -153,7 +156,7 @@ class TTSRequest(BaseModel):
     speed: float = 1.0
 
 
-def tutor_system_message(lang: str, book=None, subject=None, topic=None) -> str:
+def tutor_system_message(lang: str, book=None, subject=None, topic=None, mastery=None) -> str:
     lang_name = "Azərbaycan dilində" if lang == "az" else "Türkçe"
     base = (
         f"Sən Ağıllı Dərs-in mehriban, səbirli və qayğıkeş fərdi müəllimisən. "
@@ -192,6 +195,20 @@ def tutor_system_message(lang: str, book=None, subject=None, topic=None) -> str:
         base += f"\n\nHazırkı fənn: {subject}."
         if topic:
             base += f" Mövzu: «{topic}». Cavablarını bu fənn və mövzu ətrafında saxla."
+            info = get_topic_info(subject, topic)
+            if info:
+                base += (
+                    f"\nTəlim nəticələri: {'; '.join(info.get('learning_outcomes', []))}."
+                    f"\nƏsas anlayışlar: {', '.join(info.get('key_concepts', []))}."
+                    f"\nTez-tez edilən səhvlər (diqqət et): {'; '.join(info.get('common_mistakes', []))}."
+                )
+    li = (mastery or {}).get("level_index") if isinstance(mastery, dict) else None
+    if not li or li <= 1:
+        base += "\n\nUyğunlaşma: şagird bu mövzuda yenidir; daha sadə dil və daha kiçik addımlar işlət."
+    elif li >= 4:
+        base += "\n\nUyğunlaşma: şagird mövzunu mənimsəyib; ona bir az çətin, düşündürücü tapşırıq ver."
+    else:
+        base += "\n\nUyğunlaşma: şagird inkişaf edir; normal tempdə davam et."
     if book:
         base += (
             f"\n\nHazırda bu dərsliyi öyrənirsiniz:\nBaşlıq: {book.get('title','')}\n"
@@ -299,7 +316,14 @@ async def chat_stream(req: ChatRequest, sid: str = Depends(current_student)):
     if req.book_id:
         book = await db.books.find_one({"id": req.book_id})
     session_id = session_key(req.book_id, req.subject, req.topic, sid)
-    sysmsg = tutor_system_message(req.lang, book, req.subject, req.topic)
+    mastery = None
+    try:
+        if req.subject and req.topic:
+            ms = await progress_manager.get_mastery(db, sid, req.subject, req.topic)
+            mastery = ms[0] if ms else None
+    except Exception:
+        mastery = None
+    sysmsg = tutor_system_message(req.lang, book, req.subject, req.topic, mastery)
 
     history = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(20)
     chat = make_chat(session_id, sysmsg)
@@ -698,6 +722,79 @@ async def progress_mastery(subject: Optional[str] = None, topic: Optional[str] =
 async def progress_lesson_complete(req: LessonCompleteRequest, sid: str = Depends(current_student)):
     topics = next((s["topics"] for s in SUBJECTS if s["name"] == req.subject), None)
     return await progress_manager.record_lesson_complete(db, sid, req.subject, req.topic, topics)
+
+
+# ---------------- Curriculum / review / parent PIN (additive) ----------------
+@api_router.get("/curriculum/{subject}/{topic}")
+async def curriculum_topic(subject: str, topic: str):
+    info = get_topic_info(subject, topic)
+    if not info:
+        raise HTTPException(404, "Mövzu tapılmadı")
+    return info
+
+
+@api_router.get("/progress/review-questions")
+async def review_questions(sid: str = Depends(current_student)):
+    mastery = await progress_manager.get_mastery(db, sid)
+    weak = [m for m in mastery if m.get("answered", 0) > 0 and m.get("level_index", 0) < 4]
+    weak.sort(key=lambda m: (m.get("level_index", 0), m.get("recent_accuracy_pct", 0)))
+    items = []
+    for m in weak:
+        for q in m.get("review_questions", []) or []:
+            items.append({"subject": m["subject"], "topic": m["topic"], "question": q, "source": "mistake"})
+    for m in weak:
+        info = get_topic_info(m["subject"], m["topic"]) or {}
+        for sp in info.get("sample_problems", []):
+            items.append({"subject": m["subject"], "topic": m["topic"], "question": sp["question"],
+                          "answer": sp.get("answer"), "source": "curriculum"})
+    return {"weak_topics": [{"subject": m["subject"], "topic": m["topic"], "level": m.get("level"),
+                             "level_index": m.get("level_index")} for m in weak],
+            "items": items[:5]}
+
+
+class PinSet(BaseModel):
+    pin: str = Field(pattern=r"^\d{4}$")
+    old_pin: Optional[str] = None
+
+
+class PinVerify(BaseModel):
+    pin: str
+
+
+def _pin_hash(salt: str, pin: str) -> str:
+    return hashlib.sha256((salt + pin).encode()).hexdigest()
+
+
+async def _check_pin(pin: str) -> bool:
+    doc = await db.parent_settings.find_one({"_id": "parent"})
+    if not doc or not doc.get("pin_hash"):
+        return False
+    return hmac.compare_digest(_pin_hash(doc["salt"], pin or ""), doc["pin_hash"])
+
+
+@api_router.get("/parent/pin-status")
+async def parent_pin_status():
+    doc = await db.parent_settings.find_one({"_id": "parent"})
+    return {"has_pin": bool(doc and doc.get("pin_hash"))}
+
+
+@api_router.post("/parent/pin")
+async def parent_set_pin(req: PinSet):
+    doc = await db.parent_settings.find_one({"_id": "parent"})
+    if doc and doc.get("pin_hash") and not await _check_pin(req.old_pin or ""):
+        raise HTTPException(403, "Köhnə PIN yanlışdır")
+    salt = secrets.token_hex(16)
+    await db.parent_settings.update_one(
+        {"_id": "parent"},
+        {"$set": {"pin_hash": _pin_hash(salt, req.pin), "salt": salt,
+                  "updated_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True)
+    return {"ok": True}
+
+
+@api_router.post("/parent/verify")
+async def parent_verify(req: PinVerify):
+    return {"ok": await _check_pin(req.pin)}
 
 
 app.include_router(api_router)
