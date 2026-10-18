@@ -752,6 +752,53 @@ async def review_questions(sid: str = Depends(current_student)):
             "items": items[:5]}
 
 
+@api_router.get("/progress/skill-gaps")
+async def skill_gaps(sid: str = Depends(current_student)):
+    """Read-only: weak (subject, topic) pairs mapped to curriculum skill areas. No LLM, no DB writes."""
+    gaps = []
+    for m in await progress_manager.get_mastery(db, sid):
+        answered = m.get("answered", 0)
+        if not answered or m.get("level_index", 0) >= 4:
+            continue
+        correct = m.get("distinct_correct", 0)
+        info = get_topic_info(m["subject"], m["topic"]) or {}
+        gaps.append({
+            "subject": m["subject"], "topic": m["topic"],
+            "wrong_count": answered - correct, "correct_count": correct,
+            "accuracy_pct": round(100 * correct / answered),
+            "mastery_level": m.get("level"),
+            "common_mistakes": info.get("common_mistakes", []),
+            "key_concepts": info.get("key_concepts", []),
+        })
+    gaps.sort(key=lambda g: (g["accuracy_pct"], -g["wrong_count"]))
+    return {"skill_gaps": gaps}
+
+
+def _best_hint(question: str, mistakes: list) -> Optional[str]:
+    """Pick the curriculum common_mistake sharing most words with the question (fallback: first)."""
+    if not mistakes:
+        return None
+    words = set(re.findall(r"\w+", (question or "").lower()))
+    return max(mistakes, key=lambda m: len(words & set(re.findall(r"\w+", m.lower()))))
+
+
+@api_router.get("/progress/error-analysis")
+async def error_analysis(sid: str = Depends(current_student)):
+    """Read-only: most frequent wrong answers per question, with a curriculum hint. No LLM, no DB writes."""
+    docs = await db.quiz_answers.find({"student_id": sid, "correct": False}, {"_id": 0}).to_list(5000)
+    groups = {}
+    for d in docs:
+        key = d.get("question_key") or progress_manager.question_key(d.get("question"))
+        g = groups.setdefault(key, {"question": d.get("question"), "subject": d.get("subject"),
+                                    "topic": d.get("topic"), "wrong_count": 0})
+        g["wrong_count"] += 1
+    top = sorted(groups.values(), key=lambda g: -g["wrong_count"])[:10]
+    for g in top:
+        info = get_topic_info(g["subject"], g["topic"]) or {}
+        g["hint"] = _best_hint(g["question"], info.get("common_mistakes", []))
+    return {"top_errors": top}
+
+
 class PinSet(BaseModel):
     pin: str = Field(pattern=r"^\d{4}$")
     old_pin: Optional[str] = None
