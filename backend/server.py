@@ -220,6 +220,29 @@ def tutor_system_message(lang: str, book=None, subject=None, topic=None, mastery
     return base
 
 
+# Yeni dərs başlayanda köhnə mesajlar silinmir, "archived" ilə gizlədilir (additiv sahə).
+ACTIVE_MSG = {"archived": {"$ne": True}}
+
+ADAPT_RULE = ("Cavab SƏHVDİRSƏ və ya şagird bilmədiyini deyirsə: mövzunu daha sadə dillə, kiçik addımlarla "
+              "izah et və sonra BİR asan, əsas məşq sualı ver. Cavab DÜZDÜRSƏ: qısa təriflə və növbəti "
+              "mərhələyə keç (bir az çətin məşq sualı ver). ")
+
+
+def answer_verdict_note(question_text, answer, subject=None, topic=None) -> str:
+    """Deterministik yoxlama (LLM-siz): sual tək sadə əməldirsə, şagirdin cavabını hesablayıb qeyd qaytarır.
+    Kəsr bərabərliyi nəzərə alınır (1/2 == 2/4). Səhvdə kurikulumdan uyğun ipucu (common_mistakes) əlavə olunur.
+    Yoxlamaq mümkün deyilsə boş sətir."""
+    verdict = quiz_engine.check_arithmetic(question_text or "", answer or "")
+    if verdict is True:
+        return "Sistem yoxlaması: şagirdin cavabı DÜZDÜR. "
+    if verdict is False:
+        hint = _best_hint(question_text, (get_topic_info(subject, topic) or {}).get("common_mistakes", [])) \
+            if subject and topic else None
+        return ("Sistem yoxlaması: şagirdin cavabı SƏHVDİR. "
+                + (f"Ehtimal olunan səhv (kurikulum): {hint}. Bunu mehribanca düzəlt. " if hint else ""))
+    return ""
+
+
 def make_chat(session_id: str, system_message: str) -> LlmChat:
     return LlmChat(api_key=EMERGENT_KEY, session_id=session_id,
                    system_message=system_message).with_model(MODEL_PROVIDER, MODEL_NAME)
@@ -325,11 +348,17 @@ async def chat_stream(req: ChatRequest, sid: str = Depends(current_student)):
         mastery = None
     sysmsg = tutor_system_message(req.lang, book, req.subject, req.topic, mastery)
 
-    history = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(20)
+    # FIX: əvvəl ən KÖHNƏ 20 mesaj götürülürdü (sort asc + limit), uzun dərsdə kontekst köhnəlirdi.
+    # İndi ən YENİ 20 mesaj götürülür və xronoloji sıraya qaytarılır. Arxivlənmişlər nəzərə alınmır.
+    history = await db.messages.find({"session_id": session_id, **ACTIVE_MSG}) \
+        .sort("created_at", -1).to_list(20)
+    history.reverse()
     chat = make_chat(session_id, sysmsg)
 
     if req.explain:
-        await db.messages.delete_many({"session_id": session_id})
+        # FIX: delete_many əvəzinə additiv arxivləmə — yeni dərs köhnə tarixçəni SİLMİR, sadəcə gizlədir.
+        await db.messages.update_many({"session_id": session_id, **ACTIVE_MSG},
+                                      {"$set": {"archived": True}})
         user_text = (f"Yeni dərs başlayır. Fənn: «{req.subject}». Bugünkü mövzu: «{req.topic}». "
                      f"Şagirdi bu mövzunun adı ilə mehriban salamla. 1-2 cümlə ilə bu gün nə "
                      f"öyrənəcəyinizi söylə, sonra əvvəlki biliklərini yoxlamaq üçün mövzuya uyğun "
@@ -343,10 +372,12 @@ async def chat_stream(req: ChatRequest, sid: str = Depends(current_student)):
                 "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
                 "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
             })
+        # FIX: diaqnostik cavab düz/səhv kontekstinə görə açıq uyğunlaşma qaydası alır;
+        # mümkün olduqda (tək sadə əməl, məs. "1/4 + 2/4 neçədir?") qərar deterministikdir.
         user_text = (f"Şagird cavab verdi: «{req.message}». Bu, onun cavablandırdığı ilk "
-                     f"diaqnostik sualdır. Cavabını nəzərə al və dərsi davam etdir: mövzunu "
-                     f"şagirdin əvvəlki biliklərinə uyğun, sadə addımlarla və gündəlik nümunələrlə "
-                     f"öyrət. Cavabına uyğun mehriban reaksiya ver; ilkin sualı təkrarlama.")
+                     f"diaqnostik sualdır. {answer_verdict_note(history[0].get('content'), req.message, req.subject, req.topic)}"
+                     f"{ADAPT_RULE} Mövzunu şagirdin əvvəlki biliklərinə uyğun, sadə addımlarla və "
+                     f"gündəlik nümunələrlə öyrət. Cavabına uyğun mehriban reaksiya ver; ilkin sualı təkrarlama.")
     elif req.stage == "recall":
         if req.message:
             await db.messages.insert_one({
@@ -365,7 +396,9 @@ async def chat_stream(req: ChatRequest, sid: str = Depends(current_student)):
                 "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
                 "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
             })
+        last_q = next((m.get("content") for m in reversed(history) if m.get("role") == "assistant"), "")
         user_text = (f"Bu, verdiyin sonuncu suala şagirdin cavabıdır:\n«{req.message}»\n"
+                     f"{answer_verdict_note(last_q, req.message, req.subject, req.topic)}"
                      f"Əgər cavab doğrudursa, onu təriflə və dərhal növbəti qısa sualı ver. "
                      f"Əgər cavab səhvdirsə və ya şagird bilmədiyini deyirsə, həmin mövzunu müəllimdən daha "
                      f"yaxşı, daha sadə şəkildə, gündəlik nümunə ilə yenidən izah et, sonra asan bir sual ver. "
@@ -417,7 +450,7 @@ async def chat_stream(req: ChatRequest, sid: str = Depends(current_student)):
 async def get_messages(book_id: str = None, subject: str = None, topic: str = None,
                        sid: str = Depends(current_student)):
     session_id = session_key(book_id, subject, topic, sid)
-    docs = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(200)
+    docs = await db.messages.find({"session_id": session_id, **ACTIVE_MSG}).sort("created_at", 1).to_list(200)
     return [{"role": d["role"], "content": d["content"], "id": d["id"]} for d in docs]
 
 

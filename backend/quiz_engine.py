@@ -74,6 +74,14 @@ def parse_number(text):
         return Fraction(_NUM_WORDS[m.group(1)]) / 100
     if t in _NUM_WORDS:
         return Fraction(_NUM_WORDS[t])
+    # FIX: qarışıq ədəd ("1 1/2", "1 tam 1/2") əvvəl boşluq silinərək "11/2" kimi oxunurdu.
+    m = re.fullmatch(r"(-?)(\d+)\s+(?:tam\s+)?(\d+)\s*/\s*(\d+)", t)
+    if m:
+        whole, num, den = int(m.group(2)), int(m.group(3)), int(m.group(4))
+        if den == 0:
+            return None
+        val = whole + Fraction(num, den)
+        return -val if m.group(1) else val
     pct = t.endswith("%")
     t = t.rstrip("%").strip().replace(" ", "").replace(",", ".").replace("−", "-")
     try:
@@ -99,6 +107,20 @@ def answers_equal(a, b):
     if na is not None and nb is not None:
         return na == nb
     return None
+
+
+def validate_fraction_answer(student_answer, correct_answer) -> bool:
+    """Deterministik kəsr bərabərliyi (LLM-siz): "1/2" == "2/4" == "0,5" == "yarım"; "1 1/2" == "3/2"."""
+    return answers_equal(student_answer, correct_answer) is True
+
+
+def is_lowest_terms(answer) -> bool:
+    """"a/b" yazılışı ixtisar olunubmu? Kəsr yazılışı deyilsə True (yoxlanmır)."""
+    m = re.fullmatch(r"\s*-?(\d+)\s*/\s*(\d+)\s*", str(answer or ""))
+    if not m or int(m.group(2)) == 0:
+        return True
+    from math import gcd
+    return gcd(int(m.group(1)), int(m.group(2))) == 1
 
 
 def _to_fraction(token: str):
@@ -216,6 +238,9 @@ def quick_evaluate(question: dict, student_answer: str):
     None — yalnız mətnli qısa cavab üçün, mənanı LLM qiymətləndirir.
     """
     verdict = answers_equal(student_answer, question.get("correct_answer"))
+    # FIX: "ixtisar et" sualında 6/8 ədədi 3/4-ə bərabərdir, amma ixtisar edilməyib — düz sayılmamalıdır.
+    if verdict is True and "ixtisar" in az_lower(question.get("question")) and not is_lowest_terms(student_answer):
+        return False
     if verdict is not None:
         return verdict
     if question.get("type") == "multiple_choice":

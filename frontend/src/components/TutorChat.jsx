@@ -9,6 +9,7 @@ import { ReviewQuestions } from "./ReviewQuestions";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
+const RESUME_KEY = "agilli-lesson-resume";
 
 // Zəif görən uşaq üçün ekranda xam Markdown simvolları (**, #, `) göstərilmir; mətn özü dəyişmir.
 export const cleanForDisplay = (text) =>
@@ -189,13 +190,40 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
     await runAssistant({ subject, topic, lang, stage: "quiz_next" });
   };
 
+  // FIX (F5 davamlılığı): əvvəl hər yükləmədə explain:true göndərilir, dərs tarixçəsi sıfırlanırdı.
+  // Aktiv dərs + mərhələ sessionStorage-da saxlanılır (F5-dən sağ çıxır, yeni tabda/geri çıxanda yox):
+  // F5-dən sonra tarixçə DB-dən bərpa olunur; dərsə yenidən daxil olanda isə əvvəlki kimi yeni dərs başlayır.
+  const lessonKey = subject && topic ? `${studentId || "default"}|${subject}|${topic}` : null;
+  useEffect(() => {
+    if (!lessonKey || !stage) return;
+    try { sessionStorage.setItem(RESUME_KEY, JSON.stringify({ key: lessonKey, stage })); } catch { /* private mode */ }
+  }, [lessonKey, stage]);
+  useEffect(() => () => { try { sessionStorage.removeItem(RESUME_KEY); } catch { /* private mode */ } }, []);
+
   const initRef = useRef(null);
   useEffect(() => {
     const key = `${book?.id || ""}|${subject || ""}|${topic || ""}`;
     if (initRef.current === key) return;
     initRef.current = key;
     const load = async () => {
-      if (subject && topic) { streamExplain(); return; }
+      if (subject && topic) {
+        let resume = null;
+        try { resume = JSON.parse(sessionStorage.getItem(RESUME_KEY) || "null"); } catch { resume = null; }
+        if (resume?.key === lessonKey) {
+          try {
+            const res = await fetch(`${API}/messages?${qs()}`);
+            const hist = res.ok ? await res.json() : [];
+            if (hist.length > 0) {
+              setMessages(hist);
+              setStage(resume.stage || "explained");
+              scrollDown();
+              return;
+            }
+          } catch (err) { console.error("Failed to restore lesson", err); }
+        }
+        streamExplain();
+        return;
+      }
       let hist = [];
       try {
         const res = await fetch(`${API}/messages?${qs()}`);
