@@ -15,7 +15,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Literal, Optional
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 from emergentintegrations.llm.chat import (
@@ -828,20 +828,74 @@ async def parent_pin_status():
 @api_router.post("/parent/pin")
 async def parent_set_pin(req: PinSet):
     doc = await db.parent_settings.find_one({"_id": "parent"})
-    if doc and doc.get("pin_hash") and not await _check_pin(req.old_pin or ""):
+    if doc and doc.get("pin_hash") and not await _verify_with_lock(req.old_pin or ""):
         raise HTTPException(403, "Köhnə PIN yanlışdır")
     salt = secrets.token_hex(16)
     await db.parent_settings.update_one(
         {"_id": "parent"},
         {"$set": {"pin_hash": _pin_hash(salt, req.pin), "salt": salt,
+                  "failed_attempts": 0, "locked_until": None,
                   "updated_at": datetime.now(timezone.utc).isoformat()}},
         upsert=True)
     return {"ok": True}
 
 
+PIN_MAX_FAILS = 5
+PIN_LOCK_SECONDS = 300
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _lock_remaining(doc) -> int:
+    """Seconds left on the brute-force lock (0 = not locked)."""
+    until = (doc or {}).get("locked_until")
+    if not until:
+        return 0
+    try:
+        left = (datetime.fromisoformat(until) - _now()).total_seconds()
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int(left + 0.999))
+
+
+def _lock_error(seconds: int) -> HTTPException:
+    minutes = max(1, (seconds + 59) // 60)
+    return HTTPException(
+        status_code=429,
+        detail=f"Çox sayda səhv PIN cəhdi oldu. Təhlükəsizlik üçün {minutes} dəqiqə gözləyin və yenidən cəhd edin.",
+        headers={"Retry-After": str(seconds)})
+
+
+async def _verify_with_lock(pin: str) -> bool:
+    """Checks PIN with brute-force protection (additive fields in parent_settings).
+    Raises 429 while locked; the 5th consecutive failure starts a lock; success resets the counter."""
+    doc = await db.parent_settings.find_one({"_id": "parent"})
+    if not doc or not doc.get("pin_hash"):
+        return False
+    left = _lock_remaining(doc)
+    if left:
+        raise _lock_error(left)
+    if hmac.compare_digest(_pin_hash(doc["salt"], pin or ""), doc["pin_hash"]):
+        if doc.get("failed_attempts") or doc.get("locked_until"):
+            await db.parent_settings.update_one(
+                {"_id": "parent"}, {"$set": {"failed_attempts": 0, "locked_until": None}})
+        return True
+    fails = (0 if doc.get("locked_until") else doc.get("failed_attempts", 0)) + 1
+    if fails >= PIN_MAX_FAILS:
+        until = (_now() + timedelta(seconds=PIN_LOCK_SECONDS)).isoformat()
+        await db.parent_settings.update_one(
+            {"_id": "parent"}, {"$set": {"failed_attempts": 0, "locked_until": until}})
+        raise _lock_error(PIN_LOCK_SECONDS)
+    await db.parent_settings.update_one(
+        {"_id": "parent"}, {"$set": {"failed_attempts": fails, "locked_until": None}})
+    return False
+
+
 @api_router.post("/parent/verify")
 async def parent_verify(req: PinVerify):
-    return {"ok": await _check_pin(req.pin)}
+    return {"ok": await _verify_with_lock(req.pin)}
 
 
 app.include_router(api_router)

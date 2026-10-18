@@ -306,7 +306,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
     <div className="max-w-4xl mx-auto px-4 py-6 flex flex-col" style={{ height: "calc(100vh - 76px)" }}>
       {/* Header */}
       <div className="flex items-center gap-4 mb-4">
-        <button data-testid="chat-back-btn" onClick={onBack}
+        <button data-testid="chat-back-btn" onClick={onBack} aria-label={t.back}
           className="w-12 h-12 rounded-2xl bg-surface border-solid-2 flex items-center justify-center hover:bg-surface-2 transition-colors shrink-0">
           <ArrowLeft size={26} />
         </button>
@@ -437,7 +437,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
 
       {/* Input */}
       <div className="flex items-end gap-3">
-        <button data-testid="mic-btn"
+        <button data-testid="mic-btn" type="button" aria-label={t.micLabel} aria-pressed={listening}
           onPointerDown={startMic}
           onPointerUp={stopMic}
           onPointerCancel={stopMic}
@@ -457,12 +457,12 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
           {listening ? <Waveform /> : <Mic size={30} />}
         </button>
         <div className="flex-1 flex items-end gap-2 bg-surface border-solid-2 rounded-3xl p-2">
-          <textarea ref={inputRef} data-testid="chat-input" value={input} rows={1}
+          <textarea ref={inputRef} data-testid="chat-input" value={input} rows={1} aria-label={t.chatInputLabel}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
             placeholder={listening ? t.listening : (stage === "recall_input" ? t.recallHint : stage === "quiz" ? t.quizHint : t.askPlaceholder)}
             className="flex-1 bg-transparent outline-none resize-none text-xl px-3 py-3 max-h-40" />
-          <button data-testid="send-btn" onClick={() => send()} disabled={streaming || !input.trim()}
+          <button data-testid="send-btn" onClick={() => send()} disabled={streaming || !input.trim()} aria-label={t.sendLabel}
             className="w-14 h-14 rounded-2xl bg-accent flex items-center justify-center shrink-0 disabled:opacity-40 hover:opacity-90 transition-opacity" style={{ color: "#fff" }}>
             {streaming ? <Loader2 size={26} className="animate-spin accent-fg" /> : <Send size={26} className="accent-fg" />}
           </button>

@@ -43,6 +43,10 @@ export const ParentPinDialog = ({ t, onSuccess, onBack }) => {
         onSuccess();
       } else {
         const r = await postJson("/parent/verify", { pin });
+        if (r.status === 429) {
+          const d = await r.json().catch(() => ({}));
+          return fail(d.detail || t.pinLocked);
+        }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
         if (d.ok) onSuccess();

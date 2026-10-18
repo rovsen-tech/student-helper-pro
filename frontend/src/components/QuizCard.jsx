@@ -127,7 +127,7 @@ export const QuizCard = ({ quiz, subject, topic, onClose, onSpeak }) => {
         </div>
       ) : (
         <div className="flex gap-3">
-          <input data-testid="quiz-answer-input" value={answer} disabled={!!result && !result.error}
+          <input data-testid="quiz-answer-input" aria-label="Cavabını yaz" value={answer} disabled={!!result && !result.error}
             onChange={(e) => setAnswer(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
             placeholder="Cavabını yaz..."
