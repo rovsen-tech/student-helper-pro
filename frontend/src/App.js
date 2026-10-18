@@ -8,6 +8,7 @@ import { Home } from "@/components/Home";
 import { SubjectView } from "@/components/SubjectView";
 import { ParentPanel } from "@/components/ParentPanel";
 import { TutorChat } from "@/components/TutorChat";
+import { ProgressWidget } from "@/components/ProgressWidget";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -47,6 +48,9 @@ function App() {
           onSubject={(s) => setView({ type: "subject", subject: s })}
           onChat={(ctx) => setView({ type: "chat", ctx, from: { type: "home" } })}
           onUploaded={loadBooks} />
+      )}
+      {view.type === "home" && (
+        <div className="max-w-6xl mx-auto px-4 pb-10"><ProgressWidget /></div>
       )}
       {view.type === "subject" && (
         <SubjectView t={t} subject={view.subject}

@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { ArrowLeft, Send, Mic, Volume2, Square, Loader2, GraduationCap, Sparkles, PencilLine, ListChecks } from "lucide-react";
+import { ArrowLeft, Send, Mic, Volume2, Square, Loader2, GraduationCap, Sparkles, PencilLine, ListChecks, BookOpen, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { useTTS } from "../hooks/useTTS";
 import { SmartNotes } from "./SmartNotes";
+import { QuizCard, Confetti } from "./QuizCard";
+import { ReadingMode } from "./ReadingMode";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -35,6 +37,52 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
   const [notesOpen, setNotesOpen] = useState(false);
   const [notesData, setNotesData] = useState(null);
   const [notesLoading, setNotesLoading] = useState(false);
+  const [readingText, setReadingText] = useState(null);
+  const [quiz, setQuiz] = useState(null);
+  const [quizLoading, setQuizLoading] = useState(false);
+  const [completing, setCompleting] = useState(false);
+  const [celebrate, setCelebrate] = useState(null);
+
+  const openReading = (text) => { stop(); setReadingText(text); };
+
+  const completeLesson = async () => {
+    if (!subject || !topic || completing) return;
+    setCompleting(true);
+    try {
+      const res = await fetch(`${API}/progress/lesson-complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject, topic }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setStage("done");
+      setCelebrate(data);
+      toast.success(`+${data.xp_earned} XP · ${data.level}${data.badge_earned ? ` · 🏅 ${data.badge_earned}` : ""}`);
+      setTimeout(() => setCelebrate(null), 3500);
+    } catch (err) {
+      console.error("Lesson complete failed", err);
+      toast.error("Dərs qeyd oluna bilmədi");
+    } finally { setCompleting(false); }
+  };
+
+  const startMiniQuiz = async () => {
+    if (!subject || !topic || quizLoading) return;
+    stop();
+    setQuizLoading(true);
+    try {
+      const res = await fetch(`${API}/quiz/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject, topic, lang, difficulty: "easy", n_questions: 5 }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setQuiz(await res.json());
+    } catch (err) {
+      console.error("Quiz generate failed", err);
+      toast.error("Suallar hazırlana bilmədi, yenidən cəhd et");
+    } finally { setQuizLoading(false); }
+  };
 
   const generateNotes = async () => {
     setNotesOpen(true);
@@ -277,6 +325,12 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
                   {speakingId === m.id ? t.stop : t.listen}
                 </button>
               )}
+              {m.role === "assistant" && m.content && (
+                <button data-testid={`reading-btn-${m.id}`} onClick={() => openReading(m.content)} aria-label="Oxuma rejimi"
+                  className="mt-3 ml-2 inline-flex items-center gap-2 h-11 px-4 rounded-2xl bg-surface-2 border-solid-2 font-bold text-lg hover:bg-accent hover:text-white transition-colors">
+                  <BookOpen size={22} /> 📖 Oxu
+                </button>
+              )}
             </div>
           </div>
         ))}
@@ -293,7 +347,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
         <div data-testid="stage-indicator" className="flex flex-wrap items-center gap-2 text-base font-semibold mt-3">
           <span className={`px-3 py-1 rounded-full ${stage === "explained" ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>1. {t.stageExplain}</span>
           <span className={`px-3 py-1 rounded-full ${(stage === "recall_input" || stage === "recalled") ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>2. {t.stageRecall}</span>
-          <span className={`px-3 py-1 rounded-full ${stage === "quiz" ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>3. {t.stageQuiz}</span>
+          <span className={`px-3 py-1 rounded-full ${(stage === "quiz" || stage === "done") ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>3. {t.stageQuiz}</span>
         </div>
       )}
       {subject && topic && !streaming && (stage === "explained" || stage === "recalled") && (
@@ -311,6 +365,38 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
             </button>
           )}
         </div>
+      )}
+
+      {subject && topic && !streaming && stage === "quiz" && (
+        <button data-testid="lesson-complete-btn" onClick={completeLesson} disabled={completing}
+          className="mt-3 w-full h-14 rounded-2xl bg-surface border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:bg-surface-2 transition-colors disabled:opacity-50">
+          {completing ? <Loader2 size={24} className="animate-spin" /> : <CheckCircle2 size={24} />} Dərsi bitir
+        </button>
+      )}
+      {subject && topic && stage === "done" && !quiz && (
+        <button data-testid="mini-quiz-btn" onClick={startMiniQuiz} disabled={quizLoading || streaming}
+          className="mt-3 w-full h-14 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:opacity-90 transition-opacity disabled:opacity-50">
+          {quizLoading ? <><Loader2 size={24} className="animate-spin" /> Suallar hazırlanır...</> : "📝 Mini Quiz"}
+        </button>
+      )}
+      {quiz && (
+        <div className="mt-3 max-h-[60vh] overflow-y-auto">
+          <QuizCard quiz={quiz} subject={subject} topic={topic}
+            onSpeak={(txt) => speak(txt, "quiz-feedback")} onClose={() => { stop(); setQuiz(null); }} />
+        </div>
+      )}
+      {celebrate && (
+        <div data-testid="lesson-celebrate" className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center">
+          {celebrate.confetti && <Confetti />}
+          <div className="bg-surface border-solid-2 rounded-3xl px-8 py-6 text-center quiz-pop">
+            <p className="font-heading font-bold text-3xl">Dərs bitdi! 🎉</p>
+            <p className="text-2xl font-bold mt-2">+{celebrate.xp_earned} XP</p>
+            {celebrate.badge_earned && <p className="text-xl mt-1">🏅 {celebrate.badge_earned}</p>}
+          </div>
+        </div>
+      )}
+      {readingText && (
+        <ReadingMode text={readingText} lang={lang} speed={speed} onClose={() => setReadingText(null)} />
       )}
 
       {/* Quick asks */}

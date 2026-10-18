@@ -22,6 +22,8 @@ from emergentintegrations.llm.chat import (
 from emergentintegrations.llm.openai import OpenAITextToSpeech
 
 from smart_notes import generate_smart_notes
+import quiz_engine
+import progress_manager
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -509,6 +511,123 @@ async def startup():
     except Exception as e:
         logger.error(f"Storage init failed: {e}")
     logger.info("Startup complete")
+
+
+# ---- Quiz + Progress / Gamification (LLM + MongoDB) ----
+class QuizGenerateRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=200)
+    topic: str = Field(..., min_length=1, max_length=200)
+    lang: str = "az"
+    difficulty: Literal["easy", "medium", "hard"] = "easy"
+    n_questions: int = Field(default=5, ge=1, le=10)
+
+
+class QuizSubmitRequest(BaseModel):
+    quiz_id: str = Field(..., max_length=100)
+    question_id: str = Field(..., max_length=20)
+    student_answer: str = Field(default="", max_length=2000)
+    subject: Optional[str] = Field(default=None, max_length=200)
+    topic: Optional[str] = Field(default=None, max_length=200)
+
+
+class LessonCompleteRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=200)
+    topic: str = Field(..., min_length=1, max_length=200)
+
+
+def _public_question(q: dict) -> dict:
+    return {k: v for k, v in q.items() if k != "correct_answer"}
+
+
+@api_router.post("/quiz/generate")
+async def quiz_generate(req: QuizGenerateRequest):
+    try:
+        questions = await quiz_engine.generate_quiz(make_chat, req.topic, req.subject, req.lang,
+                                                    req.difficulty, req.n_questions)
+    except Exception as e:
+        logger.error(f"Quiz generation failed: {e}")
+        questions = []
+    if not questions:
+        raise HTTPException(502, "Suallar hazırlana bilmədi, yenidən cəhd et")
+    quiz_id = str(uuid.uuid4())
+    await db.quizzes.insert_one({
+        "quiz_id": quiz_id, "subject": req.subject, "topic": req.topic, "difficulty": req.difficulty,
+        "questions": questions, "answers": {}, "completed": False, "perfect_awarded": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    # Düzgün cavab yalnız serverdə saxlanılır; ipucu müştəriyə göndərilir.
+    return {"quiz_id": quiz_id, "questions": [_public_question(q) for q in questions]}
+
+
+@api_router.post("/quiz/submit")
+async def quiz_submit(req: QuizSubmitRequest):
+    quiz = await db.quizzes.find_one({"quiz_id": req.quiz_id})
+    if not quiz:
+        raise HTTPException(404, "Quiz tapılmadı")
+    question = next((q for q in quiz["questions"] if q["id"] == req.question_id), None)
+    if not question:
+        raise HTTPException(404, "Sual tapılmadı")
+    if req.question_id in quiz.get("answers", {}):
+        prev = quiz["answers"][req.question_id]
+        return {**prev, "xp_earned": 0, "already_answered": True}
+    subject, topic = quiz["subject"], quiz["topic"]
+    result = await quiz_engine.evaluate_answer(make_chat, question, req.student_answer)
+    # Eyni sualın iki dəfə XP qazanmasının qarşısını atomik şəkildə alırıq.
+    claim = await db.quizzes.update_one(
+        {"quiz_id": req.quiz_id, f"answers.{req.question_id}": {"$exists": False}},
+        {"$set": {f"answers.{req.question_id}": {**result, "student_answer": req.student_answer}}})
+    if not claim.modified_count:
+        return {**result, "xp_earned": 0, "already_answered": True}
+    xp = await progress_manager.record_quiz_answer(db, subject, topic, result["correct"])
+    response = {**result, "xp_earned": xp, "correct_answer": question["correct_answer"],
+                "hint": question.get("hint", ""), "quiz_complete": False, "perfect": False}
+    quiz = await db.quizzes.find_one({"quiz_id": req.quiz_id})
+    answers = quiz.get("answers", {})
+    if len(answers) >= len(quiz["questions"]):
+        perfect = all(a.get("correct") for a in answers.values())
+        n_correct = sum(1 for a in answers.values() if a.get("correct"))
+        await db.quizzes.update_one({"quiz_id": req.quiz_id}, {"$set": {
+            "completed": True, "correct_count": n_correct,
+            "completed_at": datetime.now(timezone.utc).isoformat()}})
+        response.update(quiz_complete=True, perfect=perfect,
+                        correct_count=n_correct, total=len(quiz["questions"]))
+        if perfect:
+            mark = await db.quizzes.update_one({"quiz_id": req.quiz_id, "perfect_awarded": False},
+                                               {"$set": {"perfect_awarded": True}})
+            if mark.modified_count:
+                bonus = await progress_manager.record_perfect_quiz(db, subject, topic)
+                response["xp_earned"] += bonus["xp"]
+                response["bonus_xp"] = bonus["xp"]
+                response["badge_earned"] = bonus["badge"]
+    return response
+
+
+@api_router.get("/quiz/history")
+async def quiz_history(subject: Optional[str] = None, topic: Optional[str] = None):
+    query = {}
+    if subject:
+        query["subject"] = subject
+    if topic:
+        query["topic"] = topic
+    docs = await db.quizzes.find(query, {"_id": 0}).sort("created_at", -1).to_list(5)
+    return [{
+        "quiz_id": d["quiz_id"], "subject": d["subject"], "topic": d["topic"],
+        "difficulty": d.get("difficulty"), "created_at": d.get("created_at"),
+        "completed": d.get("completed", False), "total": len(d.get("questions", [])),
+        "answered": len(d.get("answers", {})),
+        "correct_count": sum(1 for a in d.get("answers", {}).values() if a.get("correct")),
+    } for d in docs]
+
+
+@api_router.get("/progress/stats")
+async def progress_stats():
+    return await progress_manager.get_student_stats(db)
+
+
+@api_router.post("/progress/lesson-complete")
+async def progress_lesson_complete(req: LessonCompleteRequest):
+    topics = next((s["topics"] for s in SUBJECTS if s["name"] == req.subject), None)
+    return await progress_manager.record_lesson_complete(db, req.subject, req.topic, topics)
 
 
 app.include_router(api_router)
