@@ -5,6 +5,7 @@ import { useTTS } from "../hooks/useTTS";
 import { SmartNotes } from "./SmartNotes";
 import { QuizCard, Confetti } from "./QuizCard";
 import { ReadingMode } from "./ReadingMode";
+import { ReviewQuestions } from "./ReviewQuestions";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -25,7 +26,7 @@ const Waveform = () => (
   </div>
 );
 
-export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
+export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
   const book = ctx.kind === "book" ? ctx.book : null;
   const subject = ctx.kind === "lesson" ? ctx.subject : null;
   const topic = ctx.kind === "lesson" ? ctx.topic : null;
@@ -49,6 +50,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
   const [quizLoading, setQuizLoading] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [celebrate, setCelebrate] = useState(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   const openReading = (text) => { stop(); setReadingText(text); };
 
@@ -397,6 +399,17 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
           <QuizCard quiz={quiz} subject={subject} topic={topic}
             onSpeak={(txt) => speak(txt, "quiz-feedback")} onClose={() => { stop(); setQuiz(null); }} />
         </div>
+      )}
+      {!quiz && (
+        <button data-testid="review-open-btn" onClick={() => setReviewOpen((v) => !v)} aria-expanded={reviewOpen}
+          aria-label={t.reviewOpen}
+          className="mt-3 w-full h-14 rounded-2xl bg-surface border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:bg-surface-2 transition-colors focus:outline-none focus:ring-4">
+          🔁 {reviewOpen ? t.reviewClose : t.reviewOpen}
+        </button>
+      )}
+      {reviewOpen && !quiz && (
+        <ReviewQuestions t={t} studentId={studentId} onSpeak={(txt) => speak(txt, "review")}
+          onClose={() => { stop(); setReviewOpen(false); }} />
       )}
       {celebrate && (
         <div data-testid="lesson-celebrate" className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center">
