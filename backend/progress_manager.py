@@ -1,6 +1,15 @@
-"""XP, səviyyə, nişan və ardıcıl günlər (streak) — MongoDB üzərində."""
+"""XP, səviyyə, nişan, ardıcıl günlər və mənimsəmə (mastery) — MongoDB üzərində.
 
+Bütün məlumatlar `student_id` ilə ayrılır. XP motivasiya üçündür; biliyin
+ölçüsü ayrıca `compute_mastery` ilə hesablanır.
+"""
+
+import hashlib
+import re
 from datetime import date, datetime, timedelta, timezone
+
+DEFAULT_STUDENT = "default"
+LEGACY_PROFILE_ID = "student"  # köhnə tək-profil sənədi "default" şagirdə aiddir
 
 XP_LESSON = 50
 XP_QUIZ_CORRECT = 20
@@ -13,7 +22,13 @@ BADGE_PERFECT_QUIZ = "Quiz qalibi"
 BADGE_STREAK_5 = "5 dərs ardıcıl"
 BADGE_SUBJECT_MASTER = "Fənn ustası"
 
-PROFILE_ID = "student"
+MASTERY_NONE = "başlanmayıb"
+MASTERY_LEVELS = ["başlanğıc", "inkişafda", "mənimsəyir", "mənimsəyib"]
+RECENT_WINDOW = 10
+
+
+def profile_id(student_id: str) -> str:
+    return LEGACY_PROFILE_ID if student_id == DEFAULT_STUDENT else f"student:{student_id}"
 
 
 def level_info(xp: int) -> dict:
@@ -36,94 +51,178 @@ def compute_streak(days, today: date) -> int:
     return n
 
 
+def question_key(text: str) -> str:
+    norm = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    return hashlib.sha256(norm.encode()).hexdigest()[:16]
+
+
+def compute_mastery(answers: list) -> dict:
+    """Mənimsəmə səviyyəsi — XP-dən asılı deyil.
+
+    `answers`: [{correct, question_key, quiz_id, day, question}] (köhnədən yeniyə).
+    Yalnız hər sualın İLK cavabı nəzərə alınır (təkrar cəhdlə şişirtmək olmaz).
+    """
+    seen, firsts = set(), []
+    for a in answers or []:
+        k = a.get("question_key")
+        if k in seen:
+            continue
+        seen.add(k)
+        firsts.append(a)
+    if not firsts:
+        return {"level": MASTERY_NONE, "level_index": 0, "answered": 0, "distinct_correct": 0,
+                "recent_accuracy_pct": 0, "quizzes": 0, "days": 0, "review_questions": []}
+    recent = firsts[-RECENT_WINDOW:]
+    acc = sum(1 for a in recent if a.get("correct")) / len(recent)
+    distinct_correct = sum(1 for a in firsts if a.get("correct"))
+    quizzes = len({a.get("quiz_id") for a in firsts})
+    days = len({a.get("day") for a in firsts})
+    if distinct_correct >= 8 and acc >= 0.8 and quizzes >= 2 and days >= 2:
+        idx = 4
+    elif distinct_correct >= 4 and acc >= 0.6:
+        idx = 3
+    elif acc >= 0.3 or distinct_correct >= 2:
+        idx = 2
+    else:
+        idx = 1
+    review = [a.get("question") for a in reversed(recent) if not a.get("correct") and a.get("question")][:3]
+    return {"level": MASTERY_LEVELS[idx - 1], "level_index": idx, "answered": len(firsts),
+            "distinct_correct": distinct_correct, "recent_accuracy_pct": round(acc * 100),
+            "quizzes": quizzes, "days": days, "review_questions": review}
+
+
 def _now():
     return datetime.now(timezone.utc)
 
 
-async def _profile(db) -> dict:
-    return await db.student_profile.find_one({"_id": PROFILE_ID}) or {}
+async def ensure_indexes(db) -> None:
+    """İdempotent, dağıdıcı olmayan indekslər + köhnə sənədlərə student_id əlavəsi."""
+    for coll in ("progress", "activity_log", "quizzes"):
+        await db[coll].update_many({"student_id": {"$exists": False}}, {"$set": {"student_id": DEFAULT_STUDENT}})
+    await db.progress.create_index([("student_id", 1), ("subject", 1), ("topic", 1)])
+    await db.activity_log.create_index([("student_id", 1), ("created_at", -1)])
+    await db.quizzes.create_index("quiz_id", unique=True)
+    await db.quizzes.create_index([("student_id", 1), ("created_at", -1)])
+    await db.quiz_answers.create_index([("student_id", 1), ("quiz_id", 1), ("question_id", 1)], unique=True)
+    await db.quiz_answers.create_index([("student_id", 1), ("subject", 1), ("topic", 1), ("created_at", 1)])
+    await db.students.create_index("id", unique=True)
+    await db.messages.create_index([("session_id", 1), ("created_at", 1)])
 
 
-async def add_xp(db, amount: int, reason: str, subject=None, topic=None) -> int:
-    now = _now().isoformat()
+async def _profile(db, sid) -> dict:
+    return await db.student_profile.find_one({"_id": profile_id(sid)}) or {}
+
+
+async def add_xp(db, sid, amount: int, reason: str, subject=None, topic=None) -> int:
     doc = await db.student_profile.find_one_and_update(
-        {"_id": PROFILE_ID}, {"$inc": {"total_xp": amount}, "$setOnInsert": {"badges": [], "lesson_days": []}},
+        {"_id": profile_id(sid)},
+        {"$inc": {"total_xp": amount}, "$setOnInsert": {"badges": [], "lesson_days": [], "student_id": sid}},
         upsert=True, return_document=True)
-    await db.activity_log.insert_one({"type": reason, "xp": amount, "subject": subject,
-                                      "topic": topic, "created_at": now})
+    await db.activity_log.insert_one({"student_id": sid, "type": reason, "xp": amount, "subject": subject,
+                                      "topic": topic, "created_at": _now().isoformat()})
     return int((doc or {}).get("total_xp", amount))
 
 
-async def award_badge(db, badge: str) -> bool:
+async def award_badge(db, sid, badge: str) -> bool:
     res = await db.student_profile.update_one(
-        {"_id": PROFILE_ID, "badges": {"$ne": badge}}, {"$push": {"badges": badge}}, upsert=False)
+        {"_id": profile_id(sid), "badges": {"$ne": badge}}, {"$push": {"badges": badge}}, upsert=False)
     if res.modified_count:
-        await db.activity_log.insert_one({"type": "badge", "badge": badge, "xp": 0,
+        await db.activity_log.insert_one({"student_id": sid, "type": "badge", "badge": badge, "xp": 0,
                                           "created_at": _now().isoformat()})
         return True
     return False
 
 
-async def record_lesson_complete(db, subject: str, topic: str, subject_topics=None) -> dict:
+async def record_lesson_complete(db, sid, subject: str, topic: str, subject_topics=None) -> dict:
+    """XP yalnız İLK tamamlamada verilir (atomik); təkrar tamamlama qeyd olunur, XP 0."""
     now = _now()
     today = now.date()
-    prev = await db.progress.find_one({"subject": subject, "topic": topic}) or {}
-    first_time = not prev.get("lesson_completed")
-    await db.progress.update_one(
-        {"subject": subject, "topic": topic},
-        {"$set": {"lesson_completed": True, "completed_at": now.isoformat(), "last_active": now.isoformat()},
-         "$inc": {"lesson_complete_count": 1}, "$setOnInsert": {"started_at": now.isoformat()}},
-        upsert=True)
-    xp = XP_LESSON if first_time else XP_LESSON // 5
-    total = await add_xp(db, xp, "lesson_complete", subject, topic)
-    await db.student_profile.update_one({"_id": PROFILE_ID}, {"$addToSet": {"lesson_days": today.isoformat()}})
+    key = {"student_id": sid, "subject": subject, "topic": topic}
+    await db.progress.update_one(key, {"$setOnInsert": {"started_at": now.isoformat()}}, upsert=True)
+    claim = await db.progress.update_one(
+        {**key, "lesson_completed": {"$ne": True}},
+        {"$set": {"lesson_completed": True, "completed_at": now.isoformat()}})
+    first_time = bool(claim.modified_count)
+    await db.progress.update_one(key, {"$inc": {"lesson_complete_count": 1},
+                                       "$set": {"last_active": now.isoformat()}})
+    xp = XP_LESSON if first_time else 0
+    total = await add_xp(db, sid, xp, "lesson_complete" if first_time else "lesson_repeat", subject, topic)
+    await db.student_profile.update_one({"_id": profile_id(sid)}, {"$addToSet": {"lesson_days": today.isoformat()}})
 
-    profile = await _profile(db)
+    profile = await _profile(db, sid)
     earned = []
-    if await award_badge(db, BADGE_FIRST_LESSON):
+    if await award_badge(db, sid, BADGE_FIRST_LESSON):
         earned.append(BADGE_FIRST_LESSON)
-    if compute_streak(profile.get("lesson_days"), today) >= 5 and await award_badge(db, BADGE_STREAK_5):
+    if compute_streak(profile.get("lesson_days"), today) >= 5 and await award_badge(db, sid, BADGE_STREAK_5):
         earned.append(BADGE_STREAK_5)
     if subject_topics:
         done = await db.progress.count_documents(
-            {"subject": subject, "topic": {"$in": list(subject_topics)}, "lesson_completed": True})
-        if done >= len(subject_topics) and await award_badge(db, BADGE_SUBJECT_MASTER):
+            {"student_id": sid, "subject": subject, "topic": {"$in": list(subject_topics)}, "lesson_completed": True})
+        if done >= len(subject_topics) and await award_badge(db, sid, BADGE_SUBJECT_MASTER):
             earned.append(BADGE_SUBJECT_MASTER)
     info = level_info(total)
-    return {"xp_earned": xp, "new_total_xp": total, "level": info["level"],
+    return {"xp_earned": xp, "new_total_xp": total, "level": info["level"], "first_time": first_time,
             "badge_earned": earned[0] if earned else None, "badges_earned": earned,
             "confetti": bool(earned) or first_time}
 
 
-async def record_quiz_answer(db, subject, topic, correct: bool) -> int:
+async def record_quiz_answer(db, sid, quiz_id, question: dict, subject, topic, correct: bool) -> int:
+    """Cavabı quiz_answers-ə yazır (unikal indeks təkrarı bloklayır) və XP verir."""
+    now = _now()
+    try:
+        await db.quiz_answers.insert_one({
+            "student_id": sid, "quiz_id": quiz_id, "question_id": question["id"],
+            "question_key": question_key(question.get("question")), "question": question.get("question"),
+            "subject": subject, "topic": topic, "correct": bool(correct),
+            "day": now.date().isoformat(), "created_at": now.isoformat()})
+    except Exception as exc:  # DuplicateKeyError — paralel təkrar sorğu
+        if "duplicate" in str(exc).lower() or exc.__class__.__name__ == "DuplicateKeyError":
+            return 0
+        raise
     inc = {"quiz_attempts": 1, "quiz_correct": 1 if correct else 0}
     xp = XP_QUIZ_CORRECT if correct else 0
-    if xp:
-        inc["total_xp"] = xp
     await db.progress.update_one(
-        {"subject": subject, "topic": topic},
-        {"$inc": inc, "$set": {"last_quiz_at": _now().isoformat(), "last_active": _now().isoformat()},
-         "$setOnInsert": {"started_at": _now().isoformat()}},
+        {"student_id": sid, "subject": subject, "topic": topic},
+        {"$inc": inc, "$set": {"last_quiz_at": now.isoformat(), "last_active": now.isoformat()},
+         "$setOnInsert": {"started_at": now.isoformat()}},
         upsert=True)
     if xp:
-        await add_xp(db, xp, "quiz_correct", subject, topic)
+        await add_xp(db, sid, xp, "quiz_correct", subject, topic)
     return xp
 
 
-async def record_perfect_quiz(db, subject, topic) -> dict:
-    await add_xp(db, XP_PERFECT_QUIZ, "perfect_quiz", subject, topic)
-    badge = BADGE_PERFECT_QUIZ if await award_badge(db, BADGE_PERFECT_QUIZ) else None
+async def record_perfect_quiz(db, sid, subject, topic) -> dict:
+    await add_xp(db, sid, XP_PERFECT_QUIZ, "perfect_quiz", subject, topic)
+    badge = BADGE_PERFECT_QUIZ if await award_badge(db, sid, BADGE_PERFECT_QUIZ) else None
     return {"xp": XP_PERFECT_QUIZ, "badge": badge}
 
 
-async def get_student_stats(db) -> dict:
-    profile = await _profile(db)
+async def get_mastery(db, sid, subject=None, topic=None) -> list:
+    query = {"student_id": sid}
+    if subject:
+        query["subject"] = subject
+    if topic:
+        query["topic"] = topic
+    docs = await db.quiz_answers.find(query, {"_id": 0}).sort("created_at", 1).to_list(5000)
+    groups = {}
+    for d in docs:
+        groups.setdefault((d["subject"], d["topic"]), []).append(d)
+    return [{"subject": s, "topic": t, **compute_mastery(a)} for (s, t), a in groups.items()]
+
+
+async def get_student_stats(db, sid) -> dict:
+    profile = await _profile(db, sid)
     total_xp = int(profile.get("total_xp", 0))
-    docs = await db.progress.find({}).to_list(2000)
+    docs = await db.progress.find({"student_id": sid}).to_list(2000)
     attempts = sum(d.get("quiz_attempts", 0) for d in docs)
     correct = sum(d.get("quiz_correct", 0) for d in docs)
-    recent = await db.activity_log.find({}, {"_id": 0}).sort("created_at", -1).to_list(10)
+    recent = await db.activity_log.find({"student_id": sid}, {"_id": 0}).sort("created_at", -1).to_list(10)
+    mastery = await get_mastery(db, sid)
+    summary = {lvl: 0 for lvl in MASTERY_LEVELS}
+    for m in mastery:
+        summary[m["level"]] = summary.get(m["level"], 0) + 1
     return {
+        "student_id": sid,
         "total_xp": total_xp,
         **level_info(total_xp),
         "streak_days": compute_streak(profile.get("lesson_days"), _now().date()),
@@ -132,4 +231,7 @@ async def get_student_stats(db) -> dict:
         "quiz_correct_pct": round(correct * 100 / attempts) if attempts else 0,
         "badges": profile.get("badges", []),
         "recent_activity": recent,
+        "mastery_summary": summary,
+        "topics_mastered": summary.get("mənimsəyib", 0),
+        "mastery": mastery,
     }

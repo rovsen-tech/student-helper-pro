@@ -14,7 +14,14 @@ const Stat = ({ icon: Icon, label, value, testid }) => (
   </div>
 );
 
-export const ProgressWidget = () => {
+const LEVEL_STYLE = {
+  "mənimsəyib": "bg-accent text-white accent-fg",
+  "mənimsəyir": "bg-surface-2 border-solid-2",
+  "inkişafda": "bg-surface-2 border-solid-2",
+  "başlanğıc": "bg-surface-2 border-solid-2",
+};
+
+export const ProgressWidget = ({ studentId }) => {
   const [stats, setStats] = useState(null);
   const [error, setError] = useState(false);
   const [barPct, setBarPct] = useState(0);
@@ -26,7 +33,7 @@ export const ProgressWidget = () => {
       .then((d) => { if (alive) { setStats(d); setTimeout(() => alive && setBarPct(d.level_progress_pct ?? 0), 60); } })
       .catch((err) => { console.error("Progress stats failed", err); if (alive) setError(true); });
     return () => { alive = false; };
-  }, []);
+  }, [studentId]);
 
   if (error) return null;
   if (!stats) {
@@ -62,6 +69,19 @@ export const ProgressWidget = () => {
             <Stat icon={BookCheck} label="bitmiş dərs" value={stats.lessons_complete} testid="progress-lessons" />
             <Stat icon={Target} label="quiz nəticəsi" value={`${stats.quiz_correct_pct}%`} testid="progress-quiz" />
           </div>
+          {stats.mastery?.length > 0 && (
+            <div className="mt-4" data-testid="progress-mastery">
+              <p className="text-xl font-bold">Mənimsənilən mövzular: {stats.topics_mastered ?? 0}</p>
+              <p className="text-base text-secondary mb-2">Mənimsəmə XP-dən ayrıdır: ilk cavablardakı dəqiqliyə və müxtəlif günlərdəki quizlərə baxır.</p>
+              <div className="flex flex-wrap gap-2">
+                {stats.mastery.map((m) => (
+                  <span key={`${m.subject}-${m.topic}`} className={`px-3 py-1 rounded-full font-bold text-base ${LEVEL_STYLE[m.level] || "bg-surface-2 border-solid-2"}`}>
+                    {m.topic}: {m.level}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           {stats.badges?.length > 0 && (
             <div className="flex flex-wrap gap-2 mt-4" data-testid="progress-badges">
               {stats.badges.map((b) => (

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Response
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Response, Header, Depends
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -108,22 +108,43 @@ class ChatRequest(BaseModel):
     stage: Optional[str] = None
 
 
-def session_key(book_id=None, subject=None, topic=None):
+def session_key(book_id=None, subject=None, topic=None, student_id="default"):
     if book_id:
-        return f"book-{book_id}"
-    if subject and topic:
-        return "lesson-" + hashlib.sha256(f"{subject}|{topic}".encode()).hexdigest()[:12]
-    return "general"
+        key = f"book-{book_id}"
+    elif subject and topic:
+        key = "lesson-" + hashlib.sha256(f"{subject}|{topic}".encode()).hexdigest()[:12]
+    else:
+        key = "general"
+    # "default" şagird köhnə açarları saxlayır ki, mövcud tarixçə itməsin.
+    return key if student_id == DEFAULT_STUDENT else f"s-{student_id}-{key}"
 
 
-async def record_activity(subject, topic, is_question):
+# ---- Şagird kimliyi (login yoxdur; profil seçimi + X-Student-Id başlığı) ----
+DEFAULT_STUDENT = progress_manager.DEFAULT_STUDENT
+_STUDENT_ID_RE = re.compile(r"^[a-f0-9]{8,40}$")
+MAX_STUDENTS = int(os.environ.get("MAX_STUDENTS", "10"))
+QUIZ_MAX_QUESTIONS = int(os.environ.get("QUIZ_MAX_QUESTIONS", "5"))
+QUIZ_DAILY_LIMIT = int(os.environ.get("QUIZ_DAILY_LIMIT", "10"))
+
+
+async def current_student(x_student_id: Optional[str] = Header(default=None)) -> str:
+    sid = (x_student_id or "").strip()
+    if not sid or sid == DEFAULT_STUDENT:
+        return DEFAULT_STUDENT
+    if not _STUDENT_ID_RE.match(sid) or not await db.students.find_one({"id": sid}):
+        raise HTTPException(404, "Şagird profili tapılmadı")
+    return sid
+
+
+async def record_activity(subject, topic, is_question, student_id="default"):
     now = datetime.now(timezone.utc).isoformat()
     update = {"$set": {"last_active": now}, "$setOnInsert": {"started_at": now}}
     if is_question:
         update["$inc"] = {"question_count": 1}
     else:
         update["$set"]["explained"] = True
-    await db.progress.update_one({"subject": subject, "topic": topic}, update, upsert=True)
+    await db.progress.update_one({"student_id": student_id, "subject": subject, "topic": topic},
+                                 update, upsert=True)
 
 
 class TTSRequest(BaseModel):
@@ -273,11 +294,11 @@ async def upload_book(file: UploadFile = File(...), lang: str = Form("az")):
 
 
 @api_router.post("/chat")
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, sid: str = Depends(current_student)):
     book = None
     if req.book_id:
         book = await db.books.find_one({"id": req.book_id})
-    session_id = session_key(req.book_id, req.subject, req.topic)
+    session_id = session_key(req.book_id, req.subject, req.topic, sid)
     sysmsg = tutor_system_message(req.lang, book, req.subject, req.topic)
 
     history = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(20)
@@ -344,7 +365,7 @@ async def chat_stream(req: ChatRequest):
         a_subject, a_topic = "Yüklənən kitablar", book.get("title", "Kitab")
     else:
         a_subject, a_topic = "Ümumi söhbət", "Suallar"
-    await record_activity(a_subject, a_topic, (not req.explain) and bool(req.message))
+    await record_activity(a_subject, a_topic, (not req.explain) and bool(req.message), sid)
 
     async def gen():
         full = ""
@@ -369,15 +390,16 @@ async def chat_stream(req: ChatRequest):
 
 
 @api_router.get("/messages")
-async def get_messages(book_id: str = None, subject: str = None, topic: str = None):
-    session_id = session_key(book_id, subject, topic)
+async def get_messages(book_id: str = None, subject: str = None, topic: str = None,
+                       sid: str = Depends(current_student)):
+    session_id = session_key(book_id, subject, topic, sid)
     docs = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(200)
     return [{"role": d["role"], "content": d["content"], "id": d["id"]} for d in docs]
 
 
 @api_router.get("/progress")
-async def get_progress():
-    docs = await db.progress.find({}).sort("last_active", -1).to_list(1000)
+async def get_progress(sid: str = Depends(current_student)):
+    docs = await db.progress.find({"student_id": sid}).sort("last_active", -1).to_list(1000)
     by_subject = {}
     total_q = 0
     for d in docs:
@@ -510,6 +532,11 @@ async def startup():
         logger.info("Storage initialized")
     except Exception as e:
         logger.error(f"Storage init failed: {e}")
+    try:
+        await progress_manager.ensure_indexes(db)
+        logger.info("Indexes ensured")
+    except Exception as e:
+        logger.error(f"Index setup failed: {e}")
     logger.info("Startup complete")
 
 
@@ -539,29 +566,62 @@ def _public_question(q: dict) -> dict:
     return {k: v for k, v in q.items() if k != "correct_answer"}
 
 
+class StudentCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=40)
+    grade: str = Field(default="5", max_length=10)
+
+
+@api_router.get("/students")
+async def list_students():
+    docs = await db.students.find({}, {"_id": 0}).sort("created_at", 1).to_list(MAX_STUDENTS)
+    return [{"id": DEFAULT_STUDENT, "name": "Əsas profil", "grade": "5"}] + docs
+
+
+@api_router.post("/students")
+async def create_student(req: StudentCreateRequest):
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(422, "Ad boş ola bilməz")
+    if await db.students.count_documents({}) >= MAX_STUDENTS:
+        raise HTTPException(400, f"Ən çox {MAX_STUDENTS} profil yaratmaq olar")
+    doc = {"id": uuid.uuid4().hex, "name": name, "grade": req.grade.strip() or "5",
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.students.insert_one(dict(doc))
+    return doc
+
+
 @api_router.post("/quiz/generate")
-async def quiz_generate(req: QuizGenerateRequest):
+async def quiz_generate(req: QuizGenerateRequest, sid: str = Depends(current_student)):
+    today = datetime.now(timezone.utc).date().isoformat()
+    used = await db.quizzes.count_documents({"student_id": sid, "created_at": {"$gte": today}})
+    if used >= QUIZ_DAILY_LIMIT:
+        raise HTTPException(429, "Bu gün üçün quiz limiti doldu. Sabah yenidən cəhd et! 🌙")
+    n = min(req.n_questions, QUIZ_MAX_QUESTIONS)
     try:
-        questions = await quiz_engine.generate_quiz(make_chat, req.topic, req.subject, req.lang,
-                                                    req.difficulty, req.n_questions)
+        questions, dropped = await quiz_engine.generate_quiz_checked(
+            make_chat, req.topic, req.subject, req.lang, req.difficulty, n)
     except Exception as e:
         logger.error(f"Quiz generation failed: {e}")
-        questions = []
-    if not questions:
-        raise HTTPException(502, "Suallar hazırlana bilmədi, yenidən cəhd et")
+        questions, dropped = [], 0
+    if len(questions) < min(3, n):
+        raise HTTPException(502, "Yoxlamadan keçən kifayət qədər sual hazırlanmadı, yenidən cəhd et")
     quiz_id = str(uuid.uuid4())
     await db.quizzes.insert_one({
-        "quiz_id": quiz_id, "subject": req.subject, "topic": req.topic, "difficulty": req.difficulty,
-        "questions": questions, "answers": {}, "completed": False, "perfect_awarded": False,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "quiz_id": quiz_id, "student_id": sid, "subject": req.subject, "topic": req.topic,
+        "difficulty": req.difficulty, "questions": questions, "answers": {}, "completed": False,
+        "perfect_awarded": False, "created_at": datetime.now(timezone.utc).isoformat(),
+        "meta": {"grade": "5", "lang": req.lang, "model": f"{MODEL_PROVIDER}/{MODEL_NAME}",
+                 "validation_version": quiz_engine.VALIDATION_VERSION, "dropped_questions": dropped,
+                 "source": "llm-generated"},
     })
     # Düzgün cavab yalnız serverdə saxlanılır; ipucu müştəriyə göndərilir.
     return {"quiz_id": quiz_id, "questions": [_public_question(q) for q in questions]}
 
 
 @api_router.post("/quiz/submit")
-async def quiz_submit(req: QuizSubmitRequest):
-    quiz = await db.quizzes.find_one({"quiz_id": req.quiz_id})
+async def quiz_submit(req: QuizSubmitRequest, sid: str = Depends(current_student)):
+    # Sahiblik yoxlaması: başqa şagirdin quizi 404 qaytarır.
+    quiz = await db.quizzes.find_one({"quiz_id": req.quiz_id, "student_id": sid})
     if not quiz:
         raise HTTPException(404, "Quiz tapılmadı")
     question = next((q for q in quiz["questions"] if q["id"] == req.question_id), None)
@@ -574,14 +634,15 @@ async def quiz_submit(req: QuizSubmitRequest):
     result = await quiz_engine.evaluate_answer(make_chat, question, req.student_answer)
     # Eyni sualın iki dəfə XP qazanmasının qarşısını atomik şəkildə alırıq.
     claim = await db.quizzes.update_one(
-        {"quiz_id": req.quiz_id, f"answers.{req.question_id}": {"$exists": False}},
+        {"quiz_id": req.quiz_id, "student_id": sid, f"answers.{req.question_id}": {"$exists": False}},
         {"$set": {f"answers.{req.question_id}": {**result, "student_answer": req.student_answer}}})
     if not claim.modified_count:
         return {**result, "xp_earned": 0, "already_answered": True}
-    xp = await progress_manager.record_quiz_answer(db, subject, topic, result["correct"])
+    xp = await progress_manager.record_quiz_answer(db, sid, req.quiz_id, question, subject, topic,
+                                                   result["correct"])
     response = {**result, "xp_earned": xp, "correct_answer": question["correct_answer"],
                 "hint": question.get("hint", ""), "quiz_complete": False, "perfect": False}
-    quiz = await db.quizzes.find_one({"quiz_id": req.quiz_id})
+    quiz = await db.quizzes.find_one({"quiz_id": req.quiz_id, "student_id": sid})
     answers = quiz.get("answers", {})
     if len(answers) >= len(quiz["questions"]):
         perfect = all(a.get("correct") for a in answers.values())
@@ -595,16 +656,19 @@ async def quiz_submit(req: QuizSubmitRequest):
             mark = await db.quizzes.update_one({"quiz_id": req.quiz_id, "perfect_awarded": False},
                                                {"$set": {"perfect_awarded": True}})
             if mark.modified_count:
-                bonus = await progress_manager.record_perfect_quiz(db, subject, topic)
+                bonus = await progress_manager.record_perfect_quiz(db, sid, subject, topic)
                 response["xp_earned"] += bonus["xp"]
                 response["bonus_xp"] = bonus["xp"]
                 response["badge_earned"] = bonus["badge"]
+        mastery = await progress_manager.get_mastery(db, sid, subject, topic)
+        response["mastery"] = mastery[0] if mastery else None
     return response
 
 
 @api_router.get("/quiz/history")
-async def quiz_history(subject: Optional[str] = None, topic: Optional[str] = None):
-    query = {}
+async def quiz_history(subject: Optional[str] = None, topic: Optional[str] = None,
+                       sid: str = Depends(current_student)):
+    query = {"student_id": sid}
     if subject:
         query["subject"] = subject
     if topic:
@@ -620,14 +684,20 @@ async def quiz_history(subject: Optional[str] = None, topic: Optional[str] = Non
 
 
 @api_router.get("/progress/stats")
-async def progress_stats():
-    return await progress_manager.get_student_stats(db)
+async def progress_stats(sid: str = Depends(current_student)):
+    return await progress_manager.get_student_stats(db, sid)
+
+
+@api_router.get("/progress/mastery")
+async def progress_mastery(subject: Optional[str] = None, topic: Optional[str] = None,
+                           sid: str = Depends(current_student)):
+    return await progress_manager.get_mastery(db, sid, subject, topic)
 
 
 @api_router.post("/progress/lesson-complete")
-async def progress_lesson_complete(req: LessonCompleteRequest):
+async def progress_lesson_complete(req: LessonCompleteRequest, sid: str = Depends(current_student)):
     topics = next((s["topics"] for s in SUBJECTS if s["name"] == req.subject), None)
-    return await progress_manager.record_lesson_complete(db, req.subject, req.topic, topics)
+    return await progress_manager.record_lesson_complete(db, sid, req.subject, req.topic, topics)
 
 
 app.include_router(api_router)

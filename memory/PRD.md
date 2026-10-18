@@ -43,6 +43,14 @@ Parent's child has weak eyesight and cannot read lessons. Build an AI system tha
 - Stage indicator + big step buttons ("Mövzunu mən danışıram", "Suallara başla")
 - Voice answers supported at every step; lesson resets fresh on each open
 
+## Implemented (2026-10 — iteration 5: ChatGPT audit fixes)
+- Şagird profilləri (`/api/students`, `X-Student-Id` başlığı, StudentPicker); bütün progress, quiz və chat məlumatları şagirdə görə ayrılır
+- İdempotent XP: quiz cavabı üçün unikal indeks, dərs bitirmə üçün atomik claim
+- Mənimsəmə modeli XP-dən ayrıdır (ilk cavablar, ≥2 gün, ≥2 quiz)
+- LLM suallarının validasiyası (MCQ, arifmetik açar, ipucu sızması), metadata saxlanır
+- Xərc limitləri: QUIZ_DAILY_LIMIT, QUIZ_MAX_QUESTIONS, MAX_STUDENTS, QUIZ_LLM_FEEDBACK
+- Audit: docs/AUDIT.md, xərc: docs/AI_COST.md
+
 ## Backlog
 - P1: Interactive quizzes with celebratory audio feedback (TopicSimplifierCard)
 - P1: Distraction-free magnifier reading mode with sentence highlighting

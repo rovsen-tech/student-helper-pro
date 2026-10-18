@@ -58,7 +58,8 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
       const data = await res.json();
       setStage("done");
       setCelebrate(data);
-      toast.success(`+${data.xp_earned} XP · ${data.level}${data.badge_earned ? ` · 🏅 ${data.badge_earned}` : ""}`);
+      if (data.first_time === false) toast.info("Bu dərs artıq bitirilib — təkrar üçün XP verilmir, amma təkrar etmək çox faydalıdır!");
+      else toast.success(`+${data.xp_earned} XP · ${data.level}${data.badge_earned ? ` · 🏅 ${data.badge_earned}` : ""}`);
       setTimeout(() => setCelebrate(null), 3500);
     } catch (err) {
       console.error("Lesson complete failed", err);
@@ -76,6 +77,11 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ subject, topic, lang, difficulty: "easy", n_questions: 5 }),
       });
+      if (res.status === 429) {
+        const d = await res.json().catch(() => ({}));
+        toast.error(d.detail || "Bu gün üçün quiz limiti doldu. Sabah yenidən cəhd et!");
+        return;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setQuiz(await res.json());
     } catch (err) {

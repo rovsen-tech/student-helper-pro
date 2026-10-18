@@ -2,8 +2,10 @@
 
 import json
 import logging
+import os
 import re
 import uuid
+from fractions import Fraction
 
 logger = logging.getLogger(__name__)
 
@@ -32,40 +34,127 @@ def _parse_json(text: str):
         return None
 
 
+VALIDATION_VERSION = 2
+_PUNCT_RE = re.compile(r"[\"'«»“”„()\[\]{}.,!?;:…]+")
+_NUM_WORDS = {
+    "sıfır": 0, "bir": 1, "iki": 2, "üç": 3, "dörd": 4, "beş": 5, "altı": 6, "yeddi": 7, "səkkiz": 8,
+    "doqquz": 9, "on": 10, "iyirmi": 20, "otuz": 30, "qırx": 40, "əlli": 50, "altmış": 60,
+    "yetmiş": 70, "səksən": 80, "doxsan": 90, "yüz": 100, "min": 1000, "yarım": Fraction(1, 2),
+}
+_UNITS_RE = re.compile(r"(?<=\d)\s*(sm|mm|km|m|kq|q|qr|l|ml|dəq|san|saat|manat|qəpik|ədəd|dərəcə|°)\.?$")
+_ARITH_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*([+\-−×x*:÷/])\s*(\d+(?:[.,]\d+)?)")
+
+
+def az_lower(text) -> str:
+    return str(text or "").replace("İ", "i").replace("I", "ı").lower()
+
+
 def normalize_answer(text) -> str:
-    return re.sub(r"\s+", " ", str(text or "").replace("İ", "i").lower()).strip(" .!?")
+    """Azərbaycan dilinə uyğun: hərf registri (İ/ı), durğu, artıq boşluqlar."""
+    t = _PUNCT_RE.sub(" ", az_lower(text).replace("‐", "-"))
+    return re.sub(r"\s+", " ", t).strip()
 
 
-def sanitize_questions(raw, n_questions: int) -> list:
-    """LLM cavabını təhlükəsiz, sabit formata salır; yararsız sualları atır."""
-    out = []
-    for q in (raw or [])[:n_questions]:
+def parse_number(text):
+    """'0,5' == '0.5' == '1/2' == 'yarım'; '50%' -> 1/2; sonda vahid ('5 sm') atılır."""
+    t = az_lower(text).strip().strip(" .!?")
+    t = _UNITS_RE.sub("", t).strip()
+    if t in _NUM_WORDS:
+        return Fraction(_NUM_WORDS[t])
+    pct = t.endswith("%")
+    t = t.rstrip("%").strip().replace(" ", "").replace(",", ".").replace("−", "-")
+    try:
+        if re.fullmatch(r"-?\d+/\d+", t):
+            num, den = t.split("/")
+            if int(den) == 0:
+                return None
+            val = Fraction(int(num), int(den))
+        elif re.fullmatch(r"-?\d+(\.\d+)?", t):
+            val = Fraction(t)
+        else:
+            return None
+    except (ValueError, ZeroDivisionError):
+        return None
+    return val / 100 if pct else val
+
+
+def answers_equal(a, b):
+    """True/False — qəti qərar; None — deterministik qərar mümkün deyil."""
+    if normalize_answer(a) == normalize_answer(b):
+        return True
+    na, nb = parse_number(a), parse_number(b)
+    if na is not None and nb is not None:
+        return na == nb
+    return None
+
+
+def check_arithmetic(question: str, answer: str):
+    """Sualda tək sadə əməl varsa açarı yoxlayır: True/False; yoxlana bilmirsə None."""
+    found = _ARITH_RE.findall(question or "")
+    if len(found) != 1:
+        return None
+    a, op, b = found[0]
+    x, y = Fraction(a.replace(",", ".")), Fraction(b.replace(",", "."))
+    if op == "+":
+        val = x + y
+    elif op in "-−":
+        val = x - y
+    elif op in "×x*":
+        val = x * y
+    else:
+        if y == 0:
+            return None
+        val = x / y
+    ans = parse_number(answer)
+    return None if ans is None else ans == val
+
+
+def validate_questions(raw, n_questions: int):
+    """LLM sualllarını ciddi yoxlayır. Səhv/şübhəli sual TƏMİR EDİLMİR, atılır.
+
+    Qaytarır: (etibarlı suallar, atılmış sualların sayı).
+    """
+    out, dropped, seen = [], 0, set()
+    for q in (raw or []):
+        if len(out) >= n_questions:
+            break
         if not isinstance(q, dict):
+            dropped += 1
             continue
         text = str(q.get("question") or "").strip()
         answer = str(q.get("correct_answer") or "").strip()
-        if not text or not answer:
+        qtype = q.get("type")
+        if not text or not answer or qtype not in ("multiple_choice", "short_answer") or len(text) > 500:
+            dropped += 1
             continue
-        qtype = q.get("type") if q.get("type") in ("multiple_choice", "short_answer") else "short_answer"
+        if normalize_answer(text) in seen:
+            dropped += 1
+            continue
         item = {"id": f"q{len(out) + 1}", "type": qtype, "question": text,
-                "correct_answer": answer, "hint": str(q.get("hint") or "").strip()}
+                "correct_answer": answer, "hint": str(q.get("hint") or "").strip()[:300]}
         if qtype == "multiple_choice":
             opts = [str(o).strip() for o in (q.get("options") or []) if str(o).strip()]
-            opts = list(dict.fromkeys(opts))[:4]
-            if answer not in opts:
-                match = next((o for o in opts if normalize_answer(o) == normalize_answer(answer)), None)
-                if match:
-                    item["correct_answer"] = match
-                elif len(opts) == 4:
-                    opts[-1] = answer
-                else:
-                    opts.append(answer)
-            if len(opts) < 2:
-                item["type"] = "short_answer"
-            else:
-                item["options"] = opts
+            if len(opts) != 4 or len({normalize_answer(o) for o in opts}) != 4:
+                dropped += 1
+                continue
+            match = [o for o in opts if normalize_answer(o) == normalize_answer(answer)]
+            if len(match) != 1:
+                dropped += 1
+                continue
+            item["correct_answer"] = match[0]
+            item["options"] = opts
+        if check_arithmetic(text, item["correct_answer"]) is False:
+            dropped += 1
+            continue
+        if item["hint"] and normalize_answer(item["correct_answer"]) == normalize_answer(item["hint"]):
+            item["hint"] = ""  # ipucu cavabı açıqlamamalıdır
+        seen.add(normalize_answer(text))
         out.append(item)
-    return out
+    return out, dropped
+
+
+def sanitize_questions(raw, n_questions: int) -> list:
+    return validate_questions(raw, n_questions)[0]
 
 
 def quiz_prompt(topic, subject, difficulty, n_questions) -> str:
@@ -81,21 +170,30 @@ def quiz_prompt(topic, subject, difficulty, n_questions) -> str:
     )
 
 
-async def generate_quiz(chat_factory, topic, subject, lang="az", difficulty="easy", n_questions=5) -> list:
+async def generate_quiz_checked(chat_factory, topic, subject, lang="az", difficulty="easy", n_questions=5):
+    """(suallar, atılmış say). Ehtiyat üçün bir neçə artıq sual istənilir."""
     n_questions = max(1, min(10, int(n_questions or 5)))
     chat = chat_factory(f"quiz-{uuid.uuid4()}",
                         "Sən 5-ci sinif üçün test sualları hazırlayan müəllimsən. Yalnız JSON qaytar.")
-    data = _parse_json(await _ask(chat, quiz_prompt(topic, subject, difficulty, n_questions)))
-    return sanitize_questions((data or {}).get("questions"), n_questions)
+    data = _parse_json(await _ask(chat, quiz_prompt(topic, subject, difficulty, min(10, n_questions + 2))))
+    return validate_questions((data or {}).get("questions"), n_questions)
+
+
+async def generate_quiz(chat_factory, topic, subject, lang="az", difficulty="easy", n_questions=5) -> list:
+    return (await generate_quiz_checked(chat_factory, topic, subject, lang, difficulty, n_questions))[0]
 
 
 def quick_evaluate(question: dict, student_answer: str):
-    """Variantlı suallar LLM-siz yoxlanır; qısa cavabda dəqiq uyğunluq kifayətdir."""
-    if normalize_answer(student_answer) == normalize_answer(question.get("correct_answer")):
-        return True
+    """Deterministik yoxlama. Variantlı sual həmişə qəti; qısa cavabda ədədlər də qəti.
+
+    None — yalnız mətnli qısa cavab üçün, mənanı LLM qiymətləndirir.
+    """
+    verdict = answers_equal(student_answer, question.get("correct_answer"))
+    if verdict is not None:
+        return verdict
     if question.get("type") == "multiple_choice":
         return False
-    return None  # LLM qərar verməlidir
+    return None
 
 
 async def evaluate_answer(chat_factory, question: dict, student_answer: str, lang="az") -> dict:
@@ -107,6 +205,9 @@ async def evaluate_answer(chat_factory, question: dict, student_answer: str, lan
         "feedback": "Düzdür!" if correct else f"Düzgün cavab: {question.get('correct_answer')}. {hint}".strip(),
         "encouragement": "Əla iş, belə davam et! 🎉" if correct else "Narahat olma, növbəti suala birlikdə baxaq! 💪",
     }
+    # Xərc qaydası: qərar deterministikdirsə LLM çağırılmır (QUIZ_LLM_FEEDBACK=1 ilə açıla bilər).
+    if correct is not None and os.environ.get("QUIZ_LLM_FEEDBACK", "0") != "1":
+        return {**fallback, "evaluated_by": "rule"}
     try:
         chat = chat_factory(f"eval-{uuid.uuid4()}",
                             "Sən mehriban 5-ci sinif müəllimisən. Yalnız JSON qaytar.")
