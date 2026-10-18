@@ -18,7 +18,7 @@ Bu audit ChatGPT-nin PR #1 üzrə rəyinə əsaslanır. Hər bəndin statusu:
 | # | Risk (ChatGPT) | Düzəliş | Status |
 |---|----------------|---------|--------|
 | B1 | Şagird izolyasiyası yox idi (`PROFILE_ID="student"` sabiti) | `X-Student-Id` başlığı, `current_student` dependency; bütün progress/quiz/chat sorğuları `student_id` ilə filtrlənir; başqasının quizinə `submit` 404 qaytarır | TƏSDİQLƏNİB (mock Mongo testləri) |
-| B2 | Paralel və ya təkrar sorğuda XP iki dəfə verilir | `quiz_answers` üzrə unikal indeks (student_id, quiz_id, question_id); dərs bitirmə `lesson_completed $ne True` ilə atomik claim olunur | TƏSDİQLƏNİB (`asyncio.gather` testi: XP yalnız bir dəfə). Real MongoDB-də TƏSDİQLƏNMƏYİB |
+| B2 | Paralel və ya təkrar sorğuda XP iki dəfə verilir | `quiz_answers` üzrə unikal indeks (student_id, quiz_id, question_id); dərs bitirmə `lesson_completed $ne True` ilə atomik claim olunur | TƏSDİQLƏNİB (`asyncio.gather` testi və real MongoDB 7.0-da 20 paralel HTTP sorğusu: XP yalnız bir dəfə verilir) |
 | B3 | XP ilə mənimsəmə qarışıqdır | `compute_mastery`: hər sualın yalnız ilk cavabı, son 10 cavab; "mənimsəyib" üçün ≥8 fərqli düz cavab, ≥80%, ≥2 quiz, ≥2 gün | TƏSDİQLƏNİB (`MasteryTests`) |
 | B4 | Qısa cavab yoxlaması zəifdir | Azərbaycan hərfləri (İ/ı), durğu işarələri, 0,5 = 1/2 = yarım = 50%, ədəd sözləri, rəqəmdən sonra gələn vahidlər | TƏSDİQLƏNİB (unit testlər) |
 | B5 | LLM-in yaratdığı sual və açar yoxlanmır | `validate_questions`: MCQ-də tam 4 fərqli variant olmalı, açar dəqiq birinə uyğun gəlməlidir. Səhv arifmetik açarlı, dublikat və boş suallar atılır. Cavabı açan ipucu silinir. Metadata saxlanır (model, validation_version, dropped_questions). Etibarlı sual azdırsa 502 qaytarılır | TƏSDİQLƏNİB (mock). Real Gemini çıxışında BİLMİRƏM |
@@ -35,7 +35,7 @@ Bu audit ChatGPT-nin PR #1 üzrə rəyinə əsaslanır. Hər bəndin statusu:
 ## C. Prioritetli plan
 
 1. Riyaziyyatdan bir tam dərs axınını real Gemini və real MongoDB ilə (Emergent preview) sınamaq.
-2. Brauzer testi: profil seçimi, quiz, mənimsəmə chip-ləri, 429 mesajı.
+2. ~~Brauzer testi: profil seçimi, quiz, mənimsəmə chip-ləri, 429 mesajı.~~ Lokal mühitdə edildi (bax: `docs/TEST_REPORT.md`).
 3. Valideyn üçün sadə PIN (profil yaratma və silmə əməliyyatları üçün).
 4. Mənimsəmə əsasında "təkrar suallar" (`review_questions`) ekranı.
 
@@ -43,10 +43,12 @@ Bu audit ChatGPT-nin PR #1 üzrə rəyinə əsaslanır. Hər bəndin statusu:
 
 | Sahə | Mock / unit | Real |
 |------|-------------|------|
-| Quiz validasiyası, normallaşdırma, mastery | ✅ 27 test keçir (`test_quiz_progress.py`) | n/a |
-| İzolyasiya, idempotent XP, limitlər | ✅ mongomock-motor + saxta `emergentintegrations` | ❌ real MongoDB-də yoxlanılmayıb |
-| Smart Notes | ✅ 19 keçir, 1 ötürülür | n/a (LLM yoxdur) |
-| Speech preparation | ✅ | n/a |
-| Gemini və OpenAI TTS | ❌ | ❌ yoxlanılmayıb |
-| Frontend | ✅ yalnız esbuild sintaksis yoxlaması | ❌ brauzer testi və tam build edilməyib |
+| Quiz validasiyası, normallaşdırma, mastery | ✅ 29 test keçir (`test_quiz_progress.py`) | n/a |
+| İzolyasiya, idempotent XP, limitlər | ✅ mongomock-motor | ✅ real MongoDB 7.0 (29 test + 39 HTTP yoxlaması) |
+| Smart Notes | ✅ 22 keçir (real paketlərlə) | n/a (LLM yoxdur) |
+| Speech preparation | ✅ 36 keçir | n/a |
+| Gemini və OpenAI TTS | ⚠️ saxta | ❌ yoxlanılmayıb (açar yoxdur) |
+| Frontend | ✅ tam Vite build | ✅ brauzer E2E (saxta LLM ilə) |
 | Emergent deploy | ❌ | ❌ |
+
+Ətraflı nəticələr: `docs/TEST_REPORT.md`.

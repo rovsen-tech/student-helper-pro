@@ -42,7 +42,13 @@ _NUM_WORDS = {
     "yetmiş": 70, "səksən": 80, "doxsan": 90, "yüz": 100, "min": 1000, "yarım": Fraction(1, 2),
 }
 _UNITS_RE = re.compile(r"(?<=\d)\s*(sm|mm|km|m|kq|q|qr|l|ml|dəq|san|saat|manat|qəpik|ədəd|dərəcə|°)\.?$")
-_ARITH_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*([+\-−×x*:÷/])\s*(\d+(?:[.,]\d+)?)")
+# "a/b" ƏMƏL DEYİL, kəsr yazılışıdır (məs. "3/4 kəsrində surət"); "x" dəyişən ola bilər.
+_OPERAND = r"\d+(?:[.,]\d+)?(?:\s*/\s*\d+)?"
+_OPS = "+\\-−×*·:÷"
+_ARITH_RE = re.compile(
+    rf"({_OPERAND})\s*([{_OPS}])\s*({_OPERAND})\s*(?:=|\?|neçə|nə qədər|nəyə|nədir|hesabla|bərabər)",
+    re.IGNORECASE)
+_OP_COUNT_RE = re.compile(rf"\d\s*[{_OPS}](?=\s*\d)")  # lookahead: "2 + 3 + 4" → 2 əməl
 
 
 def az_lower(text) -> str:
@@ -59,6 +65,13 @@ def parse_number(text):
     """'0,5' == '0.5' == '1/2' == 'yarım'; '50%' -> 1/2; sonda vahid ('5 sm') atılır."""
     t = az_lower(text).strip().strip(" .!?")
     t = _UNITS_RE.sub("", t).strip()
+    # "50 faiz" / "50 faizi" / "%50" → "50%"; "əlli faiz" → 1/2
+    t = re.sub(r"(?<=\d)\s*faizi?$", "%", t)
+    if t.startswith("%"):
+        t = t[1:].strip() + "%"
+    m = re.fullmatch(r"(\S+)\s+faizi?", t)
+    if m and m.group(1) in _NUM_WORDS:
+        return Fraction(_NUM_WORDS[m.group(1)]) / 100
     if t in _NUM_WORDS:
         return Fraction(_NUM_WORDS[t])
     pct = t.endswith("%")
@@ -88,18 +101,32 @@ def answers_equal(a, b):
     return None
 
 
-def check_arithmetic(question: str, answer: str):
-    """Sualda tək sadə əməl varsa açarı yoxlayır: True/False; yoxlana bilmirsə None."""
-    found = _ARITH_RE.findall(question or "")
-    if len(found) != 1:
+def _to_fraction(token: str):
+    try:
+        return Fraction(re.sub(r"\s+", "", token).replace(",", "."))
+    except (ValueError, ZeroDivisionError):
         return None
-    a, op, b = found[0]
-    x, y = Fraction(a.replace(",", ".")), Fraction(b.replace(",", "."))
+
+
+def check_arithmetic(question: str, answer: str):
+    """Sual TƏK sadə əməlin hesablanmasını istəyirsə ("12 + 7 neçədir?", "1/4 + 1/4 = ?") açarı yoxlayır.
+
+    True/False — qəti qərar; None — yoxlamaq olmur (bir neçə əməl, mətn sualı, kəsr yazılışı və s.).
+    """
+    q = question or ""
+    if len(_OP_COUNT_RE.findall(q)) != 1:
+        return None
+    m = _ARITH_RE.search(q)
+    if not m:
+        return None
+    x, op, y = _to_fraction(m.group(1)), m.group(2), _to_fraction(m.group(3))
+    if x is None or y is None:
+        return None
     if op == "+":
         val = x + y
     elif op in "-−":
         val = x - y
-    elif op in "×x*":
+    elif op in "×*·":
         val = x * y
     else:
         if y == 0:

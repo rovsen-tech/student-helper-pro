@@ -99,14 +99,24 @@ async def ensure_indexes(db) -> None:
     """İdempotent, dağıdıcı olmayan indekslər + köhnə sənədlərə student_id əlavəsi."""
     for coll in ("progress", "activity_log", "quizzes"):
         await db[coll].update_many({"student_id": {"$exists": False}}, {"$set": {"student_id": DEFAULT_STUDENT}})
-    await db.progress.create_index([("student_id", 1), ("subject", 1), ("topic", 1)])
-    await db.activity_log.create_index([("student_id", 1), ("created_at", -1)])
-    await db.quizzes.create_index("quiz_id", unique=True)
-    await db.quizzes.create_index([("student_id", 1), ("created_at", -1)])
-    await db.quiz_answers.create_index([("student_id", 1), ("quiz_id", 1), ("question_id", 1)], unique=True)
-    await db.quiz_answers.create_index([("student_id", 1), ("subject", 1), ("topic", 1), ("created_at", 1)])
-    await db.students.create_index("id", unique=True)
-    await db.messages.create_index([("session_id", 1), ("created_at", 1)])
+    specs = [
+        ("quiz_answers", [("student_id", 1), ("quiz_id", 1), ("question_id", 1)], True),  # XP idempotentliyi
+        ("progress", [("student_id", 1), ("subject", 1), ("topic", 1)], False),
+        ("activity_log", [("student_id", 1), ("created_at", -1)], False),
+        ("quizzes", [("quiz_id", 1)], True),
+        ("quizzes", [("student_id", 1), ("created_at", -1)], False),
+        ("quiz_answers", [("student_id", 1), ("subject", 1), ("topic", 1), ("created_at", 1)], False),
+        ("students", [("id", 1)], True),
+        ("messages", [("session_id", 1), ("created_at", 1)], False),
+    ]
+    failed = []
+    for coll, keys, unique in specs:
+        try:  # bir indeksin uğursuzluğu digərlərini (xüsusən XP unikal indeksini) atlamasın
+            await db[coll].create_index(keys, unique=unique)
+        except Exception as e:  # noqa: BLE001
+            failed.append(f"{coll}{keys}: {e}")
+    if failed:
+        raise RuntimeError("Index setup partially failed: " + "; ".join(failed))
 
 
 async def _profile(db, sid) -> dict:

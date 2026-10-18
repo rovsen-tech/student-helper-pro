@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 import os
 import sys
 import unittest
@@ -25,6 +26,28 @@ class QuizEngineTests(unittest.TestCase):
         self.assertEqual(qe.sanitize_questions([{**base, "options": ["a", "b", "c"]}], 5), [])
         self.assertEqual(qe.sanitize_questions([{**base, "options": ["a", "A", "b", "c"]}], 5), [])
         self.assertEqual(len(qe.sanitize_questions([{**base, "options": ["a", "b", "c", "d"]}], 5)), 1)
+
+    def test_percent_written_as_word(self):
+        # Brauzer E2E-də tapıldı: "50 faiz" cavabı "50%" açarı ilə tutuşdurulmurdu.
+        for ans in ["50 faiz", "50 faizi", "%50", "50 %", "əlli faiz"]:
+            self.assertTrue(qe.answers_equal(ans, "50%"), ans)
+        self.assertFalse(qe.answers_equal("40 faiz", "50%"))
+
+    def test_arithmetic_check_does_not_misread_fraction_notation(self):
+        # E2E-də tapılan xəta: "3/4 kəsrində surət" sualı 3÷4 kimi oxunub atılırdı.
+        self.assertIsNone(qe.check_arithmetic("3/4 kəsrində surət hansıdır?", "3"))
+        self.assertIsNone(qe.check_arithmetic("1/2 ilə hansı kəsr bərabərdir?", "2/4"))
+        self.assertIsNone(qe.check_arithmetic("2 + 3 + 4 neçədir?", "9"))  # bir neçə əməl
+        self.assertIsNone(qe.check_arithmetic("x + 3 = 5 olarsa x neçədir?", "2"))
+        self.assertIsNone(qe.check_arithmetic("5-ci sinifdə 2 dərs var. Neçə?", "2"))
+        self.assertTrue(qe.check_arithmetic("1/4 + 1/4 neçədir?", "1/2"))
+        self.assertTrue(qe.check_arithmetic("1/4 + 1/4 neçədir?", "0,5"))
+        self.assertTrue(qe.check_arithmetic("12 : 4 = ?", "3"))
+        self.assertFalse(qe.check_arithmetic("3/5 - 1/5 nəyə bərabərdir?", "1/5"))
+        qs, dropped = qe.validate_questions([
+            {"type": "multiple_choice", "question": "3/4 kəsrində surət hansıdır?",
+             "options": ["3", "4", "7", "1"], "correct_answer": "3"}], 5)
+        self.assertEqual((len(qs), dropped), (1, 0))
 
     def test_wrong_arithmetic_key_is_dropped(self):
         bad = {"type": "short_answer", "question": "12 + 7 neçədir?", "correct_answer": "18"}
@@ -117,7 +140,8 @@ class _FakeChat:
     async def stream_message(self, msg):
         from emergentintegrations.llm.chat import TextDelta, StreamDone
         yield TextDelta(_FakeChat.replies.pop(0))
-        yield StreamDone()
+        # Real emergentintegrations 0.2.1-də StreamDone 5 məcburi arqument tələb edir.
+        yield StreamDone(content=None, tool_calls=None, finish_reason="stop", usage=None, raw=None)
 
 
 def _install_stubs():
@@ -140,7 +164,8 @@ def _install_stubs():
             self.content = content
 
     class StreamDone:
-        pass
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
 
     class UserMessage:
         def __init__(self, text="", file_contents=None):
@@ -170,12 +195,32 @@ class EndpointTests(unittest.TestCase):
         cls.TestClient = TestClient
         cls.Mock = AsyncMongoMockClient
 
+    # TEST_REAL_MONGO_URL verilərsə, testlər mongomock əvəzinə REAL MongoDB-də işləyir
+    # (hər test üçün ayrıca, sonda silinən test bazası).
+    REAL_MONGO = os.environ.get("TEST_REAL_MONGO_URL")
+
     def setUp(self):
-        self.server.db = self.Mock()["t"]
         self.server.make_chat = lambda *a, **k: _FakeChat()
         self.server.init_storage = lambda *a, **k: "k"
-        asyncio.get_event_loop().run_until_complete(self.server.progress_manager.ensure_indexes(self.server.db))
+        if self.REAL_MONGO:
+            from motor.motor_asyncio import AsyncIOMotorClient
+            name = f"t_{uuid.uuid4().hex[:10]}"
+            mc = AsyncIOMotorClient(self.REAL_MONGO, serverSelectionTimeoutMS=3000)
+            self.server.db = mc[name]
+        else:
+            self.server.db = self.Mock()["t"]
+        # DB startup-dan ƏVVƏL təyin olunur; bütün test boyu bir event loop (portal) işləyir.
         self.client = self.TestClient(self.server.app)
+        self.client.__enter__()
+        self.addCleanup(self.client.__exit__, None, None, None)
+        if self.REAL_MONGO:
+            self.addCleanup(lambda: self.client.portal.call(mc.drop_database, name))
+        self._run(self.server.progress_manager.ensure_indexes(self.server.db))
+
+    def _run(self, coro):
+        async def _await():
+            return await coro
+        return self.client.portal.call(_await)
 
     def _make_quiz(self, headers=None):
         _FakeChat.replies = [json.dumps({"questions": [
@@ -300,14 +345,14 @@ class EndpointTests(unittest.TestCase):
 
     def test_concurrent_submits_award_xp_once(self):
         quiz = self._make_quiz()
-        q = (asyncio.get_event_loop().run_until_complete(
+        q = (self._run(
             self.server.db.quizzes.find_one({"quiz_id": quiz["quiz_id"]})))["questions"][0]
 
         async def race():
             return await asyncio.gather(*[self.server.progress_manager.record_quiz_answer(
                 self.server.db, "default", quiz["quiz_id"], q, "Riyaziyyat", "Adi kəsrlər", True)
                 for _ in range(5)])
-        xps = asyncio.get_event_loop().run_until_complete(race())
+        xps = self._run(race())
         self.assertEqual(sorted(xps), [0, 0, 0, 0, 20])
         self.assertEqual(self.client.get("/api/progress/stats").json()["total_xp"], 20)
 
@@ -329,10 +374,9 @@ class EndpointTests(unittest.TestCase):
 
     def test_legacy_docs_backfilled_to_default(self):
         db = self.server.db
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(db.progress.insert_one({"subject": "Tarix", "topic": "Qədim insanlar",
+        self._run(db.progress.insert_one({"subject": "Tarix", "topic": "Qədim insanlar",
                                                         "question_count": 3}))
-        loop.run_until_complete(self.server.progress_manager.ensure_indexes(db))
+        self._run(self.server.progress_manager.ensure_indexes(db))
         data = self.client.get("/api/progress").json()
         self.assertEqual(data["total_questions"], 3)
         self.assertEqual(self.client.get("/api/progress", headers=self._student("Y")).json()["total_questions"], 0)

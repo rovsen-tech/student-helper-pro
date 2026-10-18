@@ -9,6 +9,13 @@ import { ReadingMode } from "./ReadingMode";
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
+// Zəif görən uşaq üçün ekranda xam Markdown simvolları (**, #, `) göstərilmir; mətn özü dəyişmir.
+export const cleanForDisplay = (text) =>
+  String(text || "")
+    .replace(/\*\*|__|`+/g, "")
+    .replace(/^\s*#{1,6}\s+/gm, "")
+    .replace(/^\s*[*+]\s+/gm, "• ");
+
 const Waveform = () => (
   <div className="flex items-end gap-1 h-6">
     {[0, 1, 2, 3, 4].map((i) => (
@@ -323,7 +330,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
           <div key={m.id} className={`rise flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
             <div className={`max-w-[85%] rounded-3xl px-5 py-4 border-solid-2 ${m.role === "user" ? "bg-accent text-white accent-fg" : "bg-surface"}`}
               style={m.role === "user" ? { borderColor: "var(--accent)" } : {}}>
-              <p className="text-xl whitespace-pre-wrap leading-relaxed">{m.content || (streaming ? t.thinking : "")}</p>
+              <p className="text-xl whitespace-pre-wrap leading-relaxed">{m.content ? cleanForDisplay(m.content) : (streaming ? t.thinking : "")}</p>
               {m.role === "assistant" && m.content && (
                 <button data-testid={`listen-btn-${m.id}`} onClick={() => (speakingId === m.id ? stop() : speak(m.content, m.id))}
                   className="mt-3 inline-flex items-center gap-2 h-11 px-4 rounded-2xl bg-surface-2 border-solid-2 font-bold text-lg hover:bg-accent hover:text-white transition-colors">
