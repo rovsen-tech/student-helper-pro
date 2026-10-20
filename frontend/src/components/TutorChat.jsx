@@ -297,7 +297,7 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack, studentId }) => 
     }
     if (result.error || !result.full.trim()) {
       setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: "", error: true } : x)));
-      setRetryAction(() => () => send(msg));
+      setRetryAction(() => () => { setMessages((m) => m.filter((x) => x.id !== aiId && x.id !== userMsg.id)); send(msg); });
       return;
     }
     speak(result.full, aiId);
@@ -406,7 +406,7 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack, studentId }) => 
                 </div>
               ) : (
                 <>
-                  <p className="text-xl whitespace-pre-wrap leading-relaxed">{m.content || (streaming ? t.thinking : "")}</p>
+                  <p className="text-xl whitespace-pre-wrap leading-relaxed">{m.content ? cleanForDisplay(m.content) : (streaming ? t.thinking : "")}</p>
                   {m.role === "assistant" && m.content && (
                     <button data-testid={`listen-btn-${m.id}`} onClick={() => (speakingId === m.id ? stop() : speak(m.content, m.id))}
                       className="mt-3 inline-flex items-center gap-2 h-11 px-4 rounded-2xl bg-surface-2 border-solid-2 font-bold text-lg hover:bg-accent hover:text-white transition-colors">

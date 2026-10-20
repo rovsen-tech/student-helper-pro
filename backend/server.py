@@ -438,6 +438,11 @@ async def chat_stream(req: ChatRequest, sid: str = Depends(current_student)):
     history = await db.messages.find({"session_id": session_id, **ACTIVE_MSG}) \
         .sort("created_at", -1).to_list(20)
     history.reverse()
+    # Retry: uğursuz cəhddən qalan eyni şagird mesajı təkrar yazılmasın.
+    if (not req.explain and req.message and history and history[-1].get("role") == "user"
+            and history[-1].get("content") == req.message):
+        await db.messages.delete_one({"id": history[-1]["id"]})
+        history.pop()
     chat = make_chat(session_id, sysmsg)
     practice_verdict = None  # quiz_answer üçün deterministik hökm (True/False/None) — frontend mini-quiz təklifi üçün
 

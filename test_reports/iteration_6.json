@@ -1,0 +1,44 @@
+{
+  "summary": "Post-merge regression (feature/merge-main <- origin/main) of Ağıllı Dərs. Backend: full pytest suite 130/130 passed (150 subtests). Textbook data stayed intact after a supervisor backend restart AND after the pytest run (textbooks=1, sections=4, lessons=39, content blocks=79); the startup hook has no delete_many. Frontend Playwright run with an isolated TEST_ student profile: home shows 10 subject cards, StudentPicker, ProgressWidget and the voice-coral/voice-nova buttons. Riyaziyyat -> textbook-view shows 4 sections and 39 lesson cards from the backend. Opening lesson-card-0 sent exactly ONE /api/chat (explain:true, lesson_id, X-Student-Id header). The tutor replied with a greeting and ONE diagnostic question, not a full explanation, and made exactly ONE /api/tts request using the chosen voice 'nova'. Leaving and re-entering the lesson resumed the old messages with 0 chat calls and showed the stage controls. Replying to the diagnostic made the tutor praise the answer and start teaching. The step-recall-btn, then step-quiz-btn (stage quiz_next), then lesson-complete-btn flow works. notes-btn makes a POST to /api/notes/generate and renders the SmartNotes panel. mic-btn (tested with a fake SpeechRecognition): pointerdown starts recognition, pointerup stops it, the transcript goes into the input and is NOT auto-sent. Chat error (fulfilled with an SSE error event, or a route abort): exactly one error-block + retry-btn, no automatic retry. Each retry click makes exactly 1 /api/chat request; a successful retry makes exactly 1 /api/tts request. The parent panel opens ParentPinDialog (create mode because no PIN is set; a mismatched PIN shows pin-error). Found and fixed a merge regression: cleanForDisplay was no longer applied when rendering messages, so raw ** markdown showed up for the low-vision child.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/chat", "issue": "In the diagnostic/recall/quiz_answer branches the user message is inserted BEFORE the LLM streams. If the LLM fails and the frontend retries, the same user message is inserted again, so it is duplicated in history. For the diagnostic reply the retry also misses the diagnostic branch, because history length is now 2 and the request falls through to the generic else branch, which inserts the message yet again. Fix: insert the user message only after a successful stream, or make the insert idempotent."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "TutorChat send() retry", "issue": "After a failed free-text send and a successful retry, the old error-block (with a now dead retry-btn, because retryAction is null) stays in the chat and the user bubble appears twice. send(msg) appends a new user+assistant pair instead of replacing the failed assistant message. Seen in Playwright: error-block count is 1 and the 'Bir nümunə ver' bubble count is 2 after the retry succeeded.", "selector": "[data-testid='error-block'], [data-testid='retry-btn']", "priority": "MEDIUM"},
+      {"component": "TutorChat message render", "issue": "FIXED by testing agent: merge regression, cleanForDisplay() was dropped from the <p> render, so raw '**bold**' markdown appeared in tutor messages. Restored as {m.content ? cleanForDisplay(m.content) : ...}. Verified: no '**' in the chat after the fix.", "selector": "[data-testid='chat-messages'] p", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Lesson chat (stage 'explained' right after the greeting)", "issues": ["Right after the greeting + diagnostic question, the stage chip '1. İzah' is active and step-recall-btn ('Mövzunu mən danışıram') is shown before any explanation has been given. The child may skip the teaching step. Consider hiding the recall button until the diagnostic has been answered (for example a 'diagnostic' stage)."]},
+      {"screen": "Home subject card", "issues": ["Riyaziyyat card says '7 mövzu', but the textbook view shows 39 lessons. The count comes from the static topics, not the textbook."]},
+      {"screen": "Smart Notes panel", "issues": ["The rule-based notes include greeting sentences ('Salam!', 'Səninlə görüşməyimə çox şadam.') in Qısa xülasə. Key concepts include stopword-like tokens ('sənə', 'etdiyimiz', 'səninlə', 'səhifə'), so smart_notes._STOPWORDS needs AZ pronouns/verb forms and assistant greeting lines should be filtered out. The panel (max-h-80) also squeezes the chat area heavily at 1080p."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Fix send() retry: replace the failed assistant message in place (or remove the failed user+error pair before resending) so no stale error-block or duplicate user bubble remains",
+    "Backend /api/chat: avoid duplicate user-message inserts when the LLM fails and the client retries; keep the diagnostic branch working on retry",
+    "Consider not showing step-recall-btn until the diagnostic question has been answered",
+    "Improve the Smart Notes heuristic: filter greetings and add AZ stopwords",
+    "Optional: make the subject card lesson count reflect the textbook lessons"
+  ],
+  "critical_code_review_comments": [
+    "TutorChat.jsx: send() and runAssistant() repeat nearly identical fetch/stream/error logic (DRY); unify them so retry semantics match",
+    "TutorChat.jsx is 560 lines; consider extracting the mic hook (useHoldToTalk) and the stage controls",
+    "server.py is 1087 lines (>700); split the routers (chat, parent, quiz, textbook)",
+    "mic-btn: stopMic fires twice on release (pointerup + lostpointercapture). Harmless, but rec.stop() is called twice",
+    "/app/memory/test_credentials.md is outdated (mentions books library, 4 seeded books, Gemini) and does not mention the parent PIN create flow"
+  ],
+  "updated_files": ["/app/frontend/src/components/TutorChat.jsx (restored cleanForDisplay in message render)"],
+  "success_rate": {"backend": "100% (130/130 pytest)", "frontend": "~92% (11/12 requested checks pass; send-retry leaves a stale error block)"},
+  "test_credentials": "No auth. No parent PIN is set in the DB (has_pin=false), so the dialog opens in create mode. The testing agent did NOT create a PIN.",
+  "seed_data_creation": "Created student TEST_Pw (8a3b6ac2af4c4ed6bf4b44f1dc3f724d) for isolation, then deleted it with its messages and progress. Textbook collections were not touched.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Use an isolated student: POST /api/students, then set localStorage 'agilli-ders-student-id' before reload. The fetch wrapper adds X-Student-Id. Lessons use lesson-card-N (flat index over 39 textbook lessons). Simulate errors with page.route('**/api/chat', fulfill SSE 'data: {\"error\": true}') or route.abort(). For the mic, inject a fake SpeechRecognition class via add_init_script. To verify the send-retry fix, abort /api/chat, send text, unroute, click retry-btn, then expect error-block count 0 and a single user bubble.",
+  "rca of the issue": "Markdown regression: while resolving the TutorChat.jsx merge conflict, the upstream render line `{m.content || ...}` replaced the local `{m.content ? cleanForDisplay(m.content) : ...}`. Stale error-block: send() retry calls send(msg), which always appends [userMsg, aiMsg] and never clears the earlier error message, unlike runAssistant (seedId 'explain'), which resets the messages."
+}
