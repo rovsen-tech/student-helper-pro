@@ -10,6 +10,11 @@ import { ReviewQuestions } from "./ReviewQuestions";
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 const RESUME_KEY = "agilli-lesson-resume";
+// Mərhələ localStorage-da saxlanılır (tab bağlanıb açılanda da qalır); əlçatan deyilsə sessionStorage.
+const resumeStore = () => {
+  try { localStorage.setItem("__agilli_t", "1"); localStorage.removeItem("__agilli_t"); return localStorage; }
+  catch { try { return sessionStorage; } catch { return null; } }
+};
 
 // Zəif görən uşaq üçün ekranda xam Markdown simvolları (**, #, `) göstərilmir; mətn özü dəyişmir.
 export const cleanForDisplay = (text) =>
@@ -52,6 +57,11 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
   const [completing, setCompleting] = useState(false);
   const [celebrate, setCelebrate] = useState(null);
   const [reviewOpen, setReviewOpen] = useState(false);
+  // Mini-quiz təklifi: məşq mərhələsində cavab sayı və deterministik düz cavab sayı.
+  const [practice, setPractice] = useState({ answered: 0, correct: 0 });
+  const lastVerdictRef = useRef(null);
+  // Qayda: 2+ düz cavab (deterministik yoxlanan) və ya 3+ cavab (yoxlanmayan mətn sualları üçün) → təklif göstərilir.
+  const miniQuizReady = practice.correct >= 2 || practice.answered >= 3;
 
   const openReading = (text) => { stop(); setReadingText(text); };
 
@@ -68,12 +78,12 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
       const data = await res.json();
       setStage("done");
       setCelebrate(data);
-      if (data.first_time === false) toast.info("Bu dərs artıq bitirilib — təkrar üçün XP verilmir, amma təkrar etmək çox faydalıdır!");
+      if (data.first_time === false) toast.info(t.lessonAlreadyDone);
       else toast.success(`+${data.xp_earned} XP · ${data.level}${data.badge_earned ? ` · 🏅 ${data.badge_earned}` : ""}`);
       setTimeout(() => setCelebrate(null), 3500);
     } catch (err) {
       console.error("Lesson complete failed", err);
-      toast.error("Dərs qeyd oluna bilmədi");
+      toast.error(t.lessonSaveFailed);
     } finally { setCompleting(false); }
   };
 
@@ -89,14 +99,14 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
       });
       if (res.status === 429) {
         const d = await res.json().catch(() => ({}));
-        toast.error(d.detail || "Bu gün üçün quiz limiti doldu. Sabah yenidən cəhd et!");
+        toast.error(d.detail || t.quizLimit);
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setQuiz(await res.json());
     } catch (err) {
       console.error("Quiz generate failed", err);
-      toast.error("Suallar hazırlana bilmədi, yenidən cəhd et");
+      toast.error(t.quizGenFailed);
     } finally { setQuizLoading(false); }
   };
 
@@ -120,7 +130,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
       setNotesData(await res.json());
     } catch (err) {
       console.error("Notes failed", err);
-      toast.error("Qeydlər hazırlana bilmədi");
+      toast.error(t.notesFailed);
       setNotesOpen(false);
     } finally { setNotesLoading(false); }
   };
@@ -138,6 +148,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "", full = "";
+    let verdict = null;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -154,9 +165,11 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
             setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: full } : x)));
             scrollDown();
           }
+          if (obj.done && typeof obj.verdict === "boolean") verdict = obj.verdict;
         } catch (err) { console.warn("SSE parse skipped", err); }
       }
     }
+    lastVerdictRef.current = verdict;
     return full;
   };
 
@@ -174,7 +187,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
       const full = await readStream(res, aiId);
       if (full) speak(full, aiId);
     } catch {
-      toast.error("Xəta");
+      toast.error(t.genericError);
     } finally { setStreaming(false); scrollDown(); }
   };
 
@@ -187,18 +200,21 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
 
   const startQuiz = async () => {
     setStage("quiz");
+    setPractice({ answered: 0, correct: 0 });
     await runAssistant({ subject, topic, lang, stage: "quiz_next" });
   };
 
   // FIX (F5 davamlılığı): əvvəl hər yükləmədə explain:true göndərilir, dərs tarixçəsi sıfırlanırdı.
-  // Aktiv dərs + mərhələ sessionStorage-da saxlanılır (F5-dən sağ çıxır, yeni tabda/geri çıxanda yox):
+  // Aktiv dərs + mərhələ localStorage-da (yoxdursa sessionStorage) şagird üzrə saxlanılır: F5 və tab bağlanıb
+  // yenidən açılanda bərpa olunur; "Geri" ilə dərsdən çıxanda (unmount) silinir. Yalnız mərhələ açarı saxlanılır.
   // F5-dən sonra tarixçə DB-dən bərpa olunur; dərsə yenidən daxil olanda isə əvvəlki kimi yeni dərs başlayır.
   const lessonKey = subject && topic ? `${studentId || "default"}|${subject}|${topic}` : null;
+  const resumeKey = `${RESUME_KEY}:${studentId || "default"}`;
   useEffect(() => {
     if (!lessonKey || !stage) return;
-    try { sessionStorage.setItem(RESUME_KEY, JSON.stringify({ key: lessonKey, stage })); } catch { /* private mode */ }
-  }, [lessonKey, stage]);
-  useEffect(() => () => { try { sessionStorage.removeItem(RESUME_KEY); } catch { /* private mode */ } }, []);
+    try { resumeStore()?.setItem(resumeKey, JSON.stringify({ key: lessonKey, stage })); } catch { /* private mode */ }
+  }, [lessonKey, resumeKey, stage]);
+  useEffect(() => () => { try { resumeStore()?.removeItem(resumeKey); } catch { /* private mode */ } }, [resumeKey]);
 
   const initRef = useRef(null);
   useEffect(() => {
@@ -208,7 +224,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
     const load = async () => {
       if (subject && topic) {
         let resume = null;
-        try { resume = JSON.parse(sessionStorage.getItem(RESUME_KEY) || "null"); } catch { resume = null; }
+        try { resume = JSON.parse(resumeStore()?.getItem(resumeKey) || "null"); } catch { resume = null; }
         if (resume?.key === lessonKey) {
           try {
             const res = await fetch(`${API}/messages?${qs()}`);
@@ -264,8 +280,12 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
       const full = await readStream(res, aiId);
       if (full) speak(full, aiId);
       if (effStage === "recall") setStage("recalled");
+      if (effStage === "quiz_answer") {
+        const ok = lastVerdictRef.current === true;
+        setPractice((p) => ({ answered: p.answered + 1, correct: p.correct + (ok ? 1 : 0) }));
+      }
     } catch {
-      toast.error("Xəta");
+      toast.error(t.genericError);
     } finally {
       setStreaming(false);
       scrollDown();
@@ -350,7 +370,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
         </div>
         <button data-testid="notes-btn" onClick={generateNotes} disabled={streaming || notesLoading}
           className="ml-auto h-12 px-4 rounded-2xl bg-surface border-solid-2 font-bold text-lg hover:bg-surface-2 transition-colors shrink-0 disabled:opacity-50">
-          📝 Qeydlər
+          {t.notesBtn}
         </button>
       </div>
 
@@ -369,9 +389,9 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
                 </button>
               )}
               {m.role === "assistant" && m.content && (
-                <button data-testid={`reading-btn-${m.id}`} onClick={() => openReading(m.content)} aria-label="Oxuma rejimi"
+                <button data-testid={`reading-btn-${m.id}`} onClick={() => openReading(m.content)} aria-label={t.readingMode}
                   className="mt-3 ml-2 inline-flex items-center gap-2 h-11 px-4 rounded-2xl bg-surface-2 border-solid-2 font-bold text-lg hover:bg-accent hover:text-white transition-colors">
-                  <BookOpen size={22} /> 📖 Oxu
+                  <BookOpen size={22} /> {t.readBtn}
                 </button>
               )}
             </div>
@@ -410,21 +430,31 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
         </div>
       )}
 
+      {subject && topic && !streaming && stage === "quiz" && !quiz && miniQuizReady && (
+        <div data-testid="mini-quiz-prompt" role="status" aria-live="polite"
+          className="mt-3 p-4 rounded-2xl bg-surface-2 border-solid-2 flex flex-col sm:flex-row items-center gap-3">
+          <p className="text-xl font-bold flex-1">{t.miniQuizReady}</p>
+          <button data-testid="mini-quiz-prompt-btn" onClick={startMiniQuiz} disabled={quizLoading}
+            className="h-14 px-5 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-heading font-bold text-xl flex items-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50 focus:outline-none focus:ring-4">
+            {quizLoading ? <><Loader2 size={24} className="animate-spin" /> {t.quizPreparing}</> : t.miniQuizStart}
+          </button>
+        </div>
+      )}
       {subject && topic && !streaming && stage === "quiz" && (
         <button data-testid="lesson-complete-btn" onClick={completeLesson} disabled={completing}
           className="mt-3 w-full h-14 rounded-2xl bg-surface border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:bg-surface-2 transition-colors disabled:opacity-50">
-          {completing ? <Loader2 size={24} className="animate-spin" /> : <CheckCircle2 size={24} />} Dərsi bitir
+          {completing ? <Loader2 size={24} className="animate-spin" /> : <CheckCircle2 size={24} />} {t.finishLesson}
         </button>
       )}
       {subject && topic && stage === "done" && !quiz && (
         <button data-testid="mini-quiz-btn" onClick={startMiniQuiz} disabled={quizLoading || streaming}
           className="mt-3 w-full h-14 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:opacity-90 transition-opacity disabled:opacity-50">
-          {quizLoading ? <><Loader2 size={24} className="animate-spin" /> Suallar hazırlanır...</> : "📝 Mini Quiz"}
+          {quizLoading ? <><Loader2 size={24} className="animate-spin" /> {t.quizPreparing}</> : t.miniQuiz}
         </button>
       )}
       {quiz && (
         <div className="mt-3 max-h-[60vh] overflow-y-auto">
-          <QuizCard quiz={quiz} subject={subject} topic={topic}
+          <QuizCard t={t} quiz={quiz} subject={subject} topic={topic}
             onSpeak={(txt) => speak(txt, "quiz-feedback")} onClose={() => { stop(); setQuiz(null); }} />
         </div>
       )}
@@ -443,7 +473,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
         <div data-testid="lesson-celebrate" className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center">
           {celebrate.confetti && <Confetti />}
           <div className="bg-surface border-solid-2 rounded-3xl px-8 py-6 text-center quiz-pop">
-            <p className="font-heading font-bold text-3xl">Dərs bitdi! 🎉</p>
+            <p className="font-heading font-bold text-3xl">{t.lessonDone}</p>
             <p className="text-2xl font-bold mt-2">+{celebrate.xp_earned} XP</p>
             {celebrate.badge_earned && <p className="text-xl mt-1">🏅 {celebrate.badge_earned}</p>}
           </div>

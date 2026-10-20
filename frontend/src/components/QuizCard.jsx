@@ -26,9 +26,9 @@ export const Confetti = () => (
 );
 
 /**
- * Props: { quiz: {quiz_id, questions}, subject, topic, onClose, onSpeak? }
+ * Props: { t?, quiz: {quiz_id, questions}, subject, topic, onClose, onSpeak? }
  */
-export const QuizCard = ({ quiz, subject, topic, onClose, onSpeak }) => {
+export const QuizCard = ({ t = {}, quiz, subject, topic, onClose, onSpeak }) => {
   const questions = quiz?.questions ?? [];
   const [index, setIndex] = useState(0);
   const [answer, setAnswer] = useState("");
@@ -110,7 +110,7 @@ export const QuizCard = ({ quiz, subject, topic, onClose, onSpeak }) => {
       <style>{QUIZ_CSS}</style>
       <div className="flex items-center justify-between mb-4 gap-3">
         <span className="text-lg font-bold text-secondary" data-testid="quiz-counter">Sual {index + 1} / {questions.length}</span>
-        <button data-testid="quiz-exit-btn" onClick={onClose} aria-label="Bağla"
+        <button data-testid="quiz-exit-btn" onClick={onClose} aria-label={t.closeLabel || "Bağla"}
           className="w-12 h-12 rounded-2xl bg-surface-2 border-solid-2 flex items-center justify-center"><X size={24} /></button>
       </div>
       <h3 className="font-heading font-bold text-3xl leading-snug mb-5" data-testid="quiz-question">{q.question}</h3>
@@ -127,10 +127,10 @@ export const QuizCard = ({ quiz, subject, topic, onClose, onSpeak }) => {
         </div>
       ) : (
         <div className="flex gap-3">
-          <input data-testid="quiz-answer-input" aria-label="Cavabını yaz" value={answer} disabled={!!result && !result.error}
+          <input data-testid="quiz-answer-input" aria-label={t.answerInputLabel || "Cavabını yaz"} value={answer} disabled={!!result && !result.error}
             onChange={(e) => setAnswer(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-            placeholder="Cavabını yaz..."
+            placeholder={t.answerPlaceholder || "Cavabını yaz..."}
             className="flex-1 h-16 px-4 rounded-2xl bg-surface-2 border-solid-2 text-2xl outline-none" />
           <button data-testid="quiz-submit-btn" onClick={() => submit()} disabled={submitting || !answer.trim() || (!!result && !result.error)}
             className="h-16 px-6 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-bold text-xl disabled:opacity-40">
@@ -139,14 +139,14 @@ export const QuizCard = ({ quiz, subject, topic, onClose, onSpeak }) => {
         </div>
       )}
 
-      {submitting && <p className="mt-4 flex items-center gap-2 text-xl"><Loader2 className="animate-spin" size={24} /> Yoxlanılır...</p>}
+      {submitting && <p className="mt-4 flex items-center gap-2 text-xl"><Loader2 className="animate-spin" size={24} /> {t.checking || "Yoxlanılır..."}</p>}
 
       {!result && !submitting && q.hint && (
         showHint
           ? <p className="mt-4 text-xl flex gap-2" data-testid="quiz-hint"><Lightbulb size={26} className="shrink-0" /> {q.hint}</p>
           : <button data-testid="quiz-hint-btn" onClick={() => setShowHint(true)}
               className="mt-4 h-12 px-4 rounded-2xl bg-surface-2 border-solid-2 font-bold text-lg inline-flex items-center gap-2">
-              <Lightbulb size={22} /> İpucu
+              <Lightbulb size={22} /> {t.hintLabel || "İpucu"}
             </button>
       )}
 

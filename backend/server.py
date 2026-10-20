@@ -354,6 +354,7 @@ async def chat_stream(req: ChatRequest, sid: str = Depends(current_student)):
         .sort("created_at", -1).to_list(20)
     history.reverse()
     chat = make_chat(session_id, sysmsg)
+    practice_verdict = None  # quiz_answer üçün deterministik hökm (True/False/None) — frontend mini-quiz təklifi üçün
 
     if req.explain:
         # FIX: delete_many əvəzinə additiv arxivləmə — yeni dərs köhnə tarixçəni SİLMİR, sadəcə gizlədir.
@@ -397,6 +398,7 @@ async def chat_stream(req: ChatRequest, sid: str = Depends(current_student)):
                 "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
             })
         last_q = next((m.get("content") for m in reversed(history) if m.get("role") == "assistant"), "")
+        practice_verdict = quiz_engine.check_arithmetic(last_q or "", req.message or "")
         user_text = (f"Bu, verdiyin sonuncu suala şagirdin cavabıdır:\n«{req.message}»\n"
                      f"{answer_verdict_note(last_q, req.message, req.subject, req.topic)}"
                      f"Əgər cavab doğrudursa, onu təriflə və dərhal növbəti qısa sualı ver. "
@@ -440,7 +442,7 @@ async def chat_stream(req: ChatRequest, sid: str = Depends(current_student)):
             "id": str(uuid.uuid4()), "session_id": session_id, "role": "assistant",
             "content": full, "created_at": datetime.now(timezone.utc).isoformat(),
         })
-        yield f"data: {json.dumps({'done': True})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'verdict': practice_verdict})}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

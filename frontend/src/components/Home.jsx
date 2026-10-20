@@ -11,7 +11,7 @@ export const Home = ({ t, lang, subjects, books, onSubject, onChat, onUploaded }
   const fileRef = useRef(null);
 
   const doUpload = async (file) => {
-    if (!file || !file.name.toLowerCase().endsWith(".pdf")) { toast.error("PDF seç"); return; }
+    if (!file || !file.name.toLowerCase().endsWith(".pdf")) { toast.error(t.pdfOnly); return; }
     setUploading(true);
     const form = new FormData();
     form.append("file", file);
@@ -39,7 +39,7 @@ export const Home = ({ t, lang, subjects, books, onSubject, onChat, onUploaded }
         </div>
         <div className="h-64 md:h-auto min-h-[18rem]">
           <img src="https://images.unsplash.com/photo-1599689868384-59cb2b01bb21?crop=entropy&cs=srgb&fm=jpg&q=85&w=900"
-            alt="student reading" className="w-full h-full object-cover" />
+            alt={t.heroImageAlt} className="w-full h-full object-cover" />
         </div>
       </div>
 
@@ -52,10 +52,11 @@ export const Home = ({ t, lang, subjects, books, onSubject, onChat, onUploaded }
           const Icon = Icons[s.icon] || BookOpen;
           return (
             <button key={s.id} data-testid={`subject-card-${s.id}`} onClick={() => onSubject(s)}
+              aria-label={`${s.name} ${t.subjectCardLabel}, ${s.topics.length} ${t.lessonsCount}`}
               className="rise text-left p-6 rounded-3xl bg-surface border-solid-2 hover:-translate-y-1 transition-transform flex items-start gap-4"
               style={{ animationDelay: `${i * 45}ms` }}>
               <div className="w-16 h-16 rounded-2xl flex items-center justify-center shrink-0" style={{ background: s.color, color: "#fff" }}>
-                <Icon size={32} />
+                <Icon size={32} aria-hidden="true" />
               </div>
               <div className="min-w-0">
                 <h3 className="font-heading font-bold text-2xl mb-1 leading-snug">{s.name}</h3>
@@ -69,7 +70,7 @@ export const Home = ({ t, lang, subjects, books, onSubject, onChat, onUploaded }
 
       {/* Tools */}
       <div className="grid md:grid-cols-2 gap-5 mb-12">
-        <button data-testid="general-chat-card" onClick={() => onChat({ kind: "general" })}
+        <button data-testid="general-chat-card" onClick={() => onChat({ kind: "general" })} aria-label={`${t.general}: ${t.generalDesc}`}
           className="text-left p-6 rounded-3xl bg-surface border-solid-2 hover:-translate-y-1 transition-transform flex items-center gap-4">
           <div className="w-16 h-16 rounded-2xl bg-accent flex items-center justify-center shrink-0" style={{ color: "#fff" }}>
             <MessageCircleQuestion size={32} className="accent-fg" />
@@ -85,9 +86,11 @@ export const Home = ({ t, lang, subjects, books, onSubject, onChat, onUploaded }
           onDragLeave={() => setDragOver(false)}
           onDrop={(e) => { e.preventDefault(); setDragOver(false); doUpload(e.dataTransfer.files[0]); }}
           onClick={() => !uploading && fileRef.current?.click()}
+          role="button" tabIndex={0} aria-label={uploading ? t.uploading : `${t.uploadBook}: ${t.dropHint}`} aria-busy={uploading}
+          onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && !uploading) { e.preventDefault(); fileRef.current?.click(); } }}
           className={`p-6 rounded-3xl border-solid-2 border-dashed flex items-center gap-4 cursor-pointer transition-colors ${dragOver ? "bg-surface-2" : "bg-surface"}`}
           style={dragOver ? { borderColor: "var(--accent)" } : {}}>
-          <input ref={fileRef} type="file" accept="application/pdf" className="hidden" data-testid="upload-input" onChange={(e) => doUpload(e.target.files[0])} />
+          <input ref={fileRef} type="file" accept="application/pdf" className="hidden" aria-label={t.uploadBook} data-testid="upload-input" onChange={(e) => doUpload(e.target.files[0])} />
           <div className="w-16 h-16 rounded-2xl bg-surface-2 flex items-center justify-center shrink-0 text-accent">
             {uploading ? <Loader2 size={32} className="animate-spin" /> : <Upload size={32} />}
           </div>
@@ -105,6 +108,7 @@ export const Home = ({ t, lang, subjects, books, onSubject, onChat, onUploaded }
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
             {books.map((b, i) => (
               <button key={b.id} data-testid={`book-card-${i}`} onClick={() => onChat({ kind: "book", book: b })}
+                aria-label={`${b.title} — ${t.startLesson}`}
                 className="rise text-left p-6 rounded-3xl bg-surface border-solid-2 hover:-translate-y-1 transition-transform flex flex-col"
                 style={{ animationDelay: `${i * 45}ms` }}>
                 <span className="px-3 py-1 rounded-full text-base font-bold text-white self-start mb-3" style={{ background: "var(--accent)" }}>{b.subject || "Kitab"}</span>
