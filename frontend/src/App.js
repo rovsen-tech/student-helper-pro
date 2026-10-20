@@ -7,7 +7,11 @@ import { AccessibilityTopBar } from "@/components/AccessibilityTopBar";
 import { Home } from "@/components/Home";
 import { SubjectView } from "@/components/SubjectView";
 import { ParentPanel } from "@/components/ParentPanel";
+import { ParentPinDialog } from "@/components/ParentPinDialog";
 import { TutorChat } from "@/components/TutorChat";
+import { ProgressWidget } from "@/components/ProgressWidget";
+import { StudentPicker } from "@/components/StudentPicker";
+import { getStudentId, setStudentId } from "@/lib/studentSession";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -21,6 +25,9 @@ function App() {
   const [books, setBooks] = useState([]);
   const [subjects, setSubjects] = useState([]);
   const [view, setView] = useState({ type: "home" });
+  const [studentId, setSid] = useState(getStudentId());
+  const [parentUnlocked, setParentUnlocked] = useState(false);
+  const changeStudent = (id) => { setStudentId(id); setSid(id); };
 
   const t = DICT[lang];
 
@@ -41,12 +48,18 @@ function App() {
 
   return (
     <div className="App">
-      <AccessibilityTopBar {...{ t, lang, setLang, theme, setTheme, fontStep, setFontStep, speed, setSpeed, onOpenParent: () => setView({ type: "parent" }) }} />
+      <AccessibilityTopBar {...{ t, lang, setLang, theme, setTheme, fontStep, setFontStep, speed, setSpeed, onOpenParent: () => { setParentUnlocked(false); setView({ type: "parent" }); } }} />
       {view.type === "home" && (
         <Home t={t} lang={lang} subjects={subjects} books={books}
           onSubject={(s) => setView({ type: "subject", subject: s })}
           onChat={(ctx) => setView({ type: "chat", ctx, from: { type: "home" } })}
           onUploaded={loadBooks} />
+      )}
+      {view.type === "home" && (
+        <div className="max-w-6xl mx-auto px-4 pb-10">
+          <StudentPicker studentId={studentId} onChange={changeStudent} />
+          <ProgressWidget key={studentId} studentId={studentId} />
+        </div>
       )}
       {view.type === "subject" && (
         <SubjectView t={t} subject={view.subject}
@@ -54,11 +67,14 @@ function App() {
           onLesson={(topic) => setView({ type: "chat", ctx: { kind: "lesson", subject: view.subject.name, topic }, from: { type: "subject", subject: view.subject } })} />
       )}
       {view.type === "chat" && (
-        <TutorChat t={t} lang={lang} ctx={view.ctx} speed={speed}
+        <TutorChat key={studentId} studentId={studentId} t={t} lang={lang} ctx={view.ctx} speed={speed}
           onBack={() => setView(view.from || { type: "home" })} />
       )}
       {view.type === "parent" && (
-        <ParentPanel t={t} subjects={subjects} onBack={() => setView({ type: "home" })} />
+        parentUnlocked
+          ? <ParentPanel key={studentId} studentId={studentId} t={t} subjects={subjects}
+              onBack={() => { setParentUnlocked(false); setView({ type: "home" }); }} />
+          : <ParentPinDialog t={t} onSuccess={() => setParentUnlocked(true)} onBack={() => setView({ type: "home" })} />
       )}
       <Toaster position="top-center" richColors />
     </div>

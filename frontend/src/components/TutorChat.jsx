@@ -1,10 +1,27 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { ArrowLeft, Send, Mic, Volume2, Square, Loader2, GraduationCap, Sparkles, PencilLine, ListChecks } from "lucide-react";
+import { ArrowLeft, Send, Mic, Volume2, Square, Loader2, GraduationCap, Sparkles, PencilLine, ListChecks, BookOpen, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { useTTS } from "../hooks/useTTS";
+import { SmartNotes } from "./SmartNotes";
+import { QuizCard, Confetti } from "./QuizCard";
+import { ReadingMode } from "./ReadingMode";
+import { ReviewQuestions } from "./ReviewQuestions";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
+const RESUME_KEY = "agilli-lesson-resume";
+// Mərhələ localStorage-da saxlanılır (tab bağlanıb açılanda da qalır); əlçatan deyilsə sessionStorage.
+const resumeStore = () => {
+  try { localStorage.setItem("__agilli_t", "1"); localStorage.removeItem("__agilli_t"); return localStorage; }
+  catch { try { return sessionStorage; } catch { return null; } }
+};
+
+// Zəif görən uşaq üçün ekranda xam Markdown simvolları (**, #, `) göstərilmir; mətn özü dəyişmir.
+export const cleanForDisplay = (text) =>
+  String(text || "")
+    .replace(/\*\*|__|`+/g, "")
+    .replace(/^\s*#{1,6}\s+/gm, "")
+    .replace(/^\s*[*+]\s+/gm, "• ");
 
 const Waveform = () => (
   <div className="flex items-end gap-1 h-6">
@@ -15,7 +32,7 @@ const Waveform = () => (
   </div>
 );
 
-export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
+export const TutorChat = ({ t, lang, ctx, speed, onBack, studentId }) => {
   const book = ctx.kind === "book" ? ctx.book : null;
   const subject = ctx.kind === "lesson" ? ctx.subject : null;
   const topic = ctx.kind === "lesson" ? ctx.topic : null;
@@ -31,6 +48,92 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
   const micTranscriptRef = useRef("");
   const inputRef = useRef(null);
   const autoSpokeRef = useRef(false);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notesData, setNotesData] = useState(null);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [readingText, setReadingText] = useState(null);
+  const [quiz, setQuiz] = useState(null);
+  const [quizLoading, setQuizLoading] = useState(false);
+  const [completing, setCompleting] = useState(false);
+  const [celebrate, setCelebrate] = useState(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  // Mini-quiz təklifi: məşq mərhələsində cavab sayı və deterministik düz cavab sayı.
+  const [practice, setPractice] = useState({ answered: 0, correct: 0 });
+  const lastVerdictRef = useRef(null);
+  // Qayda: 2+ düz cavab (deterministik yoxlanan) və ya 3+ cavab (yoxlanmayan mətn sualları üçün) → təklif göstərilir.
+  const miniQuizReady = practice.correct >= 2 || practice.answered >= 3;
+
+  const openReading = (text) => { stop(); setReadingText(text); };
+
+  const completeLesson = async () => {
+    if (!subject || !topic || completing) return;
+    setCompleting(true);
+    try {
+      const res = await fetch(`${API}/progress/lesson-complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject, topic }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setStage("done");
+      setCelebrate(data);
+      if (data.first_time === false) toast.info(t.lessonAlreadyDone);
+      else toast.success(`+${data.xp_earned} XP · ${data.level}${data.badge_earned ? ` · 🏅 ${data.badge_earned}` : ""}`);
+      setTimeout(() => setCelebrate(null), 3500);
+    } catch (err) {
+      console.error("Lesson complete failed", err);
+      toast.error(t.lessonSaveFailed);
+    } finally { setCompleting(false); }
+  };
+
+  const startMiniQuiz = async () => {
+    if (!subject || !topic || quizLoading) return;
+    stop();
+    setQuizLoading(true);
+    try {
+      const res = await fetch(`${API}/quiz/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject, topic, lang, difficulty: "easy", n_questions: 5 }),
+      });
+      if (res.status === 429) {
+        const d = await res.json().catch(() => ({}));
+        toast.error(d.detail || t.quizLimit);
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setQuiz(await res.json());
+    } catch (err) {
+      console.error("Quiz generate failed", err);
+      toast.error(t.quizGenFailed);
+    } finally { setQuizLoading(false); }
+  };
+
+  const generateNotes = async () => {
+    setNotesOpen(true);
+    setNotesLoading(true);
+    try {
+      const conversation = messages
+        .filter((m) => m?.content)
+        .slice(-100)
+        .map((m) => ({ role: m.role, content: String(m.content).slice(0, 8000) }));
+      const res = await fetch(`${BACKEND_URL}/api/notes/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lesson_id: book?.id || (subject && topic ? `${subject}|${topic}` : null),
+          subject, topic, lang: "az", exam_mode: false, conversation,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setNotesData(await res.json());
+    } catch (err) {
+      console.error("Notes failed", err);
+      toast.error(t.notesFailed);
+      setNotesOpen(false);
+    } finally { setNotesLoading(false); }
+  };
 
   const scrollDown = () => setTimeout(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }), 50);
 
@@ -45,6 +148,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "", full = "";
+    let verdict = null;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -61,9 +165,11 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
             setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content: full } : x)));
             scrollDown();
           }
+          if (obj.done && typeof obj.verdict === "boolean") verdict = obj.verdict;
         } catch (err) { console.warn("SSE parse skipped", err); }
       }
     }
+    lastVerdictRef.current = verdict;
     return full;
   };
 
@@ -81,7 +187,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
       const full = await readStream(res, aiId);
       if (full) speak(full, aiId);
     } catch {
-      toast.error("Xəta");
+      toast.error(t.genericError);
     } finally { setStreaming(false); scrollDown(); }
   };
 
@@ -94,8 +200,21 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
 
   const startQuiz = async () => {
     setStage("quiz");
+    setPractice({ answered: 0, correct: 0 });
     await runAssistant({ subject, topic, lang, stage: "quiz_next" });
   };
+
+  // FIX (F5 davamlılığı): əvvəl hər yükləmədə explain:true göndərilir, dərs tarixçəsi sıfırlanırdı.
+  // Aktiv dərs + mərhələ localStorage-da (yoxdursa sessionStorage) şagird üzrə saxlanılır: F5 və tab bağlanıb
+  // yenidən açılanda bərpa olunur; "Geri" ilə dərsdən çıxanda (unmount) silinir. Yalnız mərhələ açarı saxlanılır.
+  // F5-dən sonra tarixçə DB-dən bərpa olunur; dərsə yenidən daxil olanda isə əvvəlki kimi yeni dərs başlayır.
+  const lessonKey = subject && topic ? `${studentId || "default"}|${subject}|${topic}` : null;
+  const resumeKey = `${RESUME_KEY}:${studentId || "default"}`;
+  useEffect(() => {
+    if (!lessonKey || !stage) return;
+    try { resumeStore()?.setItem(resumeKey, JSON.stringify({ key: lessonKey, stage })); } catch { /* private mode */ }
+  }, [lessonKey, resumeKey, stage]);
+  useEffect(() => () => { try { resumeStore()?.removeItem(resumeKey); } catch { /* private mode */ } }, [resumeKey]);
 
   const initRef = useRef(null);
   useEffect(() => {
@@ -103,7 +222,24 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
     if (initRef.current === key) return;
     initRef.current = key;
     const load = async () => {
-      if (subject && topic) { streamExplain(); return; }
+      if (subject && topic) {
+        let resume = null;
+        try { resume = JSON.parse(resumeStore()?.getItem(resumeKey) || "null"); } catch { resume = null; }
+        if (resume?.key === lessonKey) {
+          try {
+            const res = await fetch(`${API}/messages?${qs()}`);
+            const hist = res.ok ? await res.json() : [];
+            if (hist.length > 0) {
+              setMessages(hist);
+              setStage(resume.stage || "explained");
+              scrollDown();
+              return;
+            }
+          } catch (err) { console.error("Failed to restore lesson", err); }
+        }
+        streamExplain();
+        return;
+      }
       let hist = [];
       try {
         const res = await fetch(`${API}/messages?${qs()}`);
@@ -144,8 +280,12 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
       const full = await readStream(res, aiId);
       if (full) speak(full, aiId);
       if (effStage === "recall") setStage("recalled");
+      if (effStage === "quiz_answer") {
+        const ok = lastVerdictRef.current === true;
+        setPractice((p) => ({ answered: p.answered + 1, correct: p.correct + (ok ? 1 : 0) }));
+      }
     } catch {
-      toast.error("Xəta");
+      toast.error(t.genericError);
     } finally {
       setStreaming(false);
       scrollDown();
@@ -214,7 +354,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
     <div className="max-w-4xl mx-auto px-4 py-6 flex flex-col" style={{ height: "calc(100vh - 76px)" }}>
       {/* Header */}
       <div className="flex items-center gap-4 mb-4">
-        <button data-testid="chat-back-btn" onClick={onBack}
+        <button data-testid="chat-back-btn" onClick={onBack} aria-label={t.back}
           className="w-12 h-12 rounded-2xl bg-surface border-solid-2 flex items-center justify-center hover:bg-surface-2 transition-colors shrink-0">
           <ArrowLeft size={26} />
         </button>
@@ -228,6 +368,10 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
             <p className="text-secondary text-base truncate">{book.key_topics.join(" • ")}</p>
           )}
         </div>
+        <button data-testid="notes-btn" onClick={generateNotes} disabled={streaming || notesLoading}
+          className="ml-auto h-12 px-4 rounded-2xl bg-surface border-solid-2 font-bold text-lg hover:bg-surface-2 transition-colors shrink-0 disabled:opacity-50">
+          {t.notesBtn}
+        </button>
       </div>
 
       {/* Messages */}
@@ -236,7 +380,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
           <div key={m.id} className={`rise flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
             <div className={`max-w-[85%] rounded-3xl px-5 py-4 border-solid-2 ${m.role === "user" ? "bg-accent text-white accent-fg" : "bg-surface"}`}
               style={m.role === "user" ? { borderColor: "var(--accent)" } : {}}>
-              <p className="text-xl whitespace-pre-wrap leading-relaxed">{m.content || (streaming ? t.thinking : "")}</p>
+              <p className="text-xl whitespace-pre-wrap leading-relaxed">{m.content ? cleanForDisplay(m.content) : (streaming ? t.thinking : "")}</p>
               {m.role === "assistant" && m.content && (
                 <button data-testid={`listen-btn-${m.id}`} onClick={() => (speakingId === m.id ? stop() : speak(m.content, m.id))}
                   className="mt-3 inline-flex items-center gap-2 h-11 px-4 rounded-2xl bg-surface-2 border-solid-2 font-bold text-lg hover:bg-accent hover:text-white transition-colors">
@@ -244,17 +388,29 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
                   {speakingId === m.id ? t.stop : t.listen}
                 </button>
               )}
+              {m.role === "assistant" && m.content && (
+                <button data-testid={`reading-btn-${m.id}`} onClick={() => openReading(m.content)} aria-label={t.readingMode}
+                  className="mt-3 ml-2 inline-flex items-center gap-2 h-11 px-4 rounded-2xl bg-surface-2 border-solid-2 font-bold text-lg hover:bg-accent hover:text-white transition-colors">
+                  <BookOpen size={22} /> {t.readBtn}
+                </button>
+              )}
             </div>
           </div>
         ))}
       </div>
+
+      {notesOpen && (
+        <div className="mt-3 max-h-80 overflow-y-auto">
+          <SmartNotes notes={notesData} loading={notesLoading} onClose={() => setNotesOpen(false)} />
+        </div>
+      )}
 
       {/* Stage controls (lessons only) */}
       {subject && topic && stage && (
         <div data-testid="stage-indicator" className="flex flex-wrap items-center gap-2 text-base font-semibold mt-3">
           <span className={`px-3 py-1 rounded-full ${stage === "explained" ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>1. {t.stageExplain}</span>
           <span className={`px-3 py-1 rounded-full ${(stage === "recall_input" || stage === "recalled") ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>2. {t.stageRecall}</span>
-          <span className={`px-3 py-1 rounded-full ${stage === "quiz" ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>3. {t.stageQuiz}</span>
+          <span className={`px-3 py-1 rounded-full ${(stage === "quiz" || stage === "done") ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>3. {t.stageQuiz}</span>
         </div>
       )}
       {subject && topic && !streaming && (stage === "explained" || stage === "recalled") && (
@@ -274,6 +430,59 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
         </div>
       )}
 
+      {subject && topic && !streaming && stage === "quiz" && !quiz && miniQuizReady && (
+        <div data-testid="mini-quiz-prompt" role="status" aria-live="polite"
+          className="mt-3 p-4 rounded-2xl bg-surface-2 border-solid-2 flex flex-col sm:flex-row items-center gap-3">
+          <p className="text-xl font-bold flex-1">{t.miniQuizReady}</p>
+          <button data-testid="mini-quiz-prompt-btn" onClick={startMiniQuiz} disabled={quizLoading}
+            className="h-14 px-5 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-heading font-bold text-xl flex items-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50 focus:outline-none focus:ring-4">
+            {quizLoading ? <><Loader2 size={24} className="animate-spin" /> {t.quizPreparing}</> : t.miniQuizStart}
+          </button>
+        </div>
+      )}
+      {subject && topic && !streaming && stage === "quiz" && (
+        <button data-testid="lesson-complete-btn" onClick={completeLesson} disabled={completing}
+          className="mt-3 w-full h-14 rounded-2xl bg-surface border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:bg-surface-2 transition-colors disabled:opacity-50">
+          {completing ? <Loader2 size={24} className="animate-spin" /> : <CheckCircle2 size={24} />} {t.finishLesson}
+        </button>
+      )}
+      {subject && topic && stage === "done" && !quiz && (
+        <button data-testid="mini-quiz-btn" onClick={startMiniQuiz} disabled={quizLoading || streaming}
+          className="mt-3 w-full h-14 rounded-2xl bg-accent text-white accent-fg border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:opacity-90 transition-opacity disabled:opacity-50">
+          {quizLoading ? <><Loader2 size={24} className="animate-spin" /> {t.quizPreparing}</> : t.miniQuiz}
+        </button>
+      )}
+      {quiz && (
+        <div className="mt-3 max-h-[60vh] overflow-y-auto">
+          <QuizCard t={t} quiz={quiz} subject={subject} topic={topic}
+            onSpeak={(txt) => speak(txt, "quiz-feedback")} onClose={() => { stop(); setQuiz(null); }} />
+        </div>
+      )}
+      {!quiz && (
+        <button data-testid="review-open-btn" onClick={() => setReviewOpen((v) => !v)} aria-expanded={reviewOpen}
+          aria-label={t.reviewOpen}
+          className="mt-3 w-full h-14 rounded-2xl bg-surface border-solid-2 font-heading font-bold text-xl flex items-center justify-center gap-3 hover:bg-surface-2 transition-colors focus:outline-none focus:ring-4">
+          🔁 {reviewOpen ? t.reviewClose : t.reviewOpen}
+        </button>
+      )}
+      {reviewOpen && !quiz && (
+        <ReviewQuestions t={t} studentId={studentId} onSpeak={(txt) => speak(txt, "review")}
+          onClose={() => { stop(); setReviewOpen(false); }} />
+      )}
+      {celebrate && (
+        <div data-testid="lesson-celebrate" className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center">
+          {celebrate.confetti && <Confetti />}
+          <div className="bg-surface border-solid-2 rounded-3xl px-8 py-6 text-center quiz-pop">
+            <p className="font-heading font-bold text-3xl">{t.lessonDone}</p>
+            <p className="text-2xl font-bold mt-2">+{celebrate.xp_earned} XP</p>
+            {celebrate.badge_earned && <p className="text-xl mt-1">🏅 {celebrate.badge_earned}</p>}
+          </div>
+        </div>
+      )}
+      {readingText && (
+        <ReadingMode text={readingText} lang={lang} speed={speed} onClose={() => setReadingText(null)} />
+      )}
+
       {/* Quick asks */}
       <div className="flex flex-wrap gap-2 my-3">
         {quicks.map((q, i) => (
@@ -286,7 +495,7 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
 
       {/* Input */}
       <div className="flex items-end gap-3">
-        <button data-testid="mic-btn"
+        <button data-testid="mic-btn" type="button" aria-label={t.micLabel} aria-pressed={listening}
           onPointerDown={startMic}
           onPointerUp={stopMic}
           onPointerCancel={stopMic}
@@ -306,12 +515,12 @@ export const TutorChat = ({ t, lang, ctx, speed, onBack }) => {
           {listening ? <Waveform /> : <Mic size={30} />}
         </button>
         <div className="flex-1 flex items-end gap-2 bg-surface border-solid-2 rounded-3xl p-2">
-          <textarea ref={inputRef} data-testid="chat-input" value={input} rows={1}
+          <textarea ref={inputRef} data-testid="chat-input" value={input} rows={1} aria-label={t.chatInputLabel}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
             placeholder={listening ? t.listening : (stage === "recall_input" ? t.recallHint : stage === "quiz" ? t.quizHint : t.askPlaceholder)}
             className="flex-1 bg-transparent outline-none resize-none text-xl px-3 py-3 max-h-40" />
-          <button data-testid="send-btn" onClick={() => send()} disabled={streaming || !input.trim()}
+          <button data-testid="send-btn" onClick={() => send()} disabled={streaming || !input.trim()} aria-label={t.sendLabel}
             className="w-14 h-14 rounded-2xl bg-accent flex items-center justify-center shrink-0 disabled:opacity-40 hover:opacity-90 transition-opacity" style={{ color: "#fff" }}>
             {streaming ? <Loader2 size={26} className="animate-spin accent-fg" /> : <Send size={26} className="accent-fg" />}
           </button>
