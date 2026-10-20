@@ -61,3 +61,12 @@ Parent's child has weak eyesight and cannot read lessons. Build an AI system tha
 - P2: Progress tracking / rewards for the child
 - P2: Multiple child profiles
 - P2: Per-book delete/rename in library
+
+## 2026-06 — origin/main merge (branch feature/merge-main)
+- Merged origin/main (AZ teacher prompt, greeting+diagnostic start, session summary, hold-to-record mic, no startup deletion, speech_preparation.py, Smart Notes, quiz/progress, StudentPicker, parent PIN, curriculum).
+- Kept: textbook lesson_source grounding, voice choice (coral/nova), lesson resume, manual retry.
+- Student identity unified on main's X-Student-Id header (old body student_id removed).
+- Fixed: retry duplicate bubbles (frontend), duplicate user message on retry (backend).
+- DB preserved: 39 lessons / 79 blocks. Backup JSON in /app/backup. pytest 120 passed; iteration_6 frontend passed.
+## Open
+- Recall button visible before diagnostic answered; Riyaziyyat card says "7 mövzu" vs 39 lessons; PDF text quality unverified.
