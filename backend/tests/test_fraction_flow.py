@@ -64,6 +64,17 @@ class FractionValidation(unittest.TestCase):
         self.assertFalse(self.qe.check_arithmetic("1/4 + 1/4 neçədir?", "2/8"))
         self.assertTrue(self.qe.check_arithmetic("1/4 + 1/4 neçədir?", "1/2"))
 
+    def test_zero_denominator_options_dropped(self):
+        # Real Gemini sınağında görülən hal: "8/9 - 5/9" sualında "3/0", "13/0" variantları
+        bad = {"type": "multiple_choice", "question": "8/9 kəsrindən 5/9 kəsrini çıxdıqda cavab neçə alınır?",
+               "options": ["3/9", "13/9", "3/0", "13/0"], "correct_answer": "3/9", "hint": ""}
+        good = {**bad, "options": ["3/9", "13/9", "1/9", "3/18"]}
+        out, dropped = self.qe.validate_questions([bad, good], 5)
+        self.assertEqual(dropped, 1)
+        self.assertEqual([q["options"] for q in out], [good["options"]])
+        self.assertIsNone(self.qe.ZERO_DENOM_RE.search("10/20"))
+        self.assertIsNone(self.qe.ZERO_DENOM_RE.search("3/0,5"))
+
 
 class FractionLessonFlow(unittest.TestCase):
     REAL_MONGO = os.environ.get("TEST_REAL_MONGO_URL")

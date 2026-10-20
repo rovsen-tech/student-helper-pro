@@ -49,6 +49,7 @@ _ARITH_RE = re.compile(
     rf"({_OPERAND})\s*([{_OPS}])\s*({_OPERAND})\s*(?:=|\?|neçə|nə qədər|nəyə|nədir|hesabla|bərabər)",
     re.IGNORECASE)
 _OP_COUNT_RE = re.compile(rf"\d\s*[{_OPS}](?=\s*\d)")  # lookahead: "2 + 3 + 4" → 2 əməl
+ZERO_DENOM_RE = re.compile(r"\d\s*/\s*0+(?![\d.,])")  # "3/0", "13 / 00" — məxrəci sıfır olan kəsr
 
 
 def az_lower(text) -> str:
@@ -184,6 +185,10 @@ def validate_questions(raw, n_questions: int):
         if qtype == "multiple_choice":
             opts = [str(o).strip() for o in (q.get("options") or []) if str(o).strip()]
             if len(opts) != 4 or len({normalize_answer(o) for o in opts}) != 4:
+                dropped += 1
+                continue
+            # Real Gemini sınağında "3/0", "13/0" kimi məxrəci sıfır olan variantlar çıxdı — mənasızdır, sual atılır.
+            if any(ZERO_DENOM_RE.search(o) for o in opts):
                 dropped += 1
                 continue
             match = [o for o in opts if normalize_answer(o) == normalize_answer(answer)]
