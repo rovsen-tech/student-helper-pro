@@ -1,0 +1,31 @@
+{
+  "summary": "Tested the diagnostic stage, the spoken end-of-lesson summary, the parent-panel summaries section, the real Riyaziyyat lesson count, and the retry regression. Backend: 8/8 new pytest tests pass (test_diagnostic_summary.py). Frontend (Playwright, isolated TEST students): every requested flow works. The Riyaziyyat card shows '39 mövzu' and the other subjects show their topic count. A lesson opens with a greeting and a diagnostic question, stage-chip-diagnostic is active, and step-recall-btn is absent, including while the answer streams. After the answer the stage becomes '2. İzah' and step-recall-btn appears. The full flow recall -> step-quiz-btn -> lesson-complete-btn adds a 2-3 sentence summary bubble (listen-btn-summary*) and sends exactly 1 /api/tts request with the summary text. The stage becomes done and mini-quiz-btn is shown. The parent panel (new PIN 1234 on the TEST student) lists 1 summary-item-<id> with topic, subject and date; summaries-empty does not show. Re-entering a lesson with only 1 assistant message resumes in diagnostic. Retry check: /api/chat was aborted during the diagnostic answer, so error-block appeared with no recall button; after unrouting and clicking retry-btn there were 0 error blocks, a single user bubble, 3 bubbles in total, and the stage moved to explained.",
+  "backend_issues": {"critical": [], "minor": [
+    {"endpoint": "POST /api/lesson-summary", "issue": "Any client can call it without completing a lesson, and there is no rate limit, so repeated calls each trigger an LLM call and add a duplicate summary to Mongo."}
+  ]},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Summary persistence in chat", "issue": "The summary bubble exists only in frontend state. It is not saved to db.messages, so it disappears from the chat after a reload or re-entry. It is still saved in lesson_summaries for parents.", "affected_selectors": ["[data-testid^=listen-btn-summary]"]}
+    ],
+    "design_issues": [
+      {"screen": "Parent summaries", "issues": ["The date uses toLocaleDateString('az-AZ'), which renders as ISO-like '2026-10-20'. Acceptable, but 'dd.mm.yyyy' may read better for parents."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_diagnostic_summary.py", "/app/test_reports/pytest/pytest_iter7.xml"],
+  "action_items": [
+    "Optional: persist the summary as an assistant message, or reload the latest summary on re-entry, so the child can listen to it again",
+    "Optional: tie POST /api/lesson-summary to a lesson completion, or limit it to one per lesson per day"
+  ],
+  "critical_code_review_comments": [
+    "TutorChat.jsx is 584 lines and getting close to the 700-line limit. Consider moving the lesson-stage logic (runAssistant, stage controls, summary) into a hook.",
+    "App.js does not restore the lesson view after F5; the app reloads to Home. The resume entry TutorChat writes to localStorage is not removed by a reload, so a later re-entry can pick up that old stage. Only matters if F5 lesson restore is expected.",
+    "The summary prompt is built only from the conversation, so the summary can mention content from the child's own recall that is unrelated to the topic (seen in testing: a 'kəsrlər' remark on the '1.1 İlkin yoxlama' topic). This is expected behaviour, not a bug."
+  ],
+  "updated_files": ["/app/backend/tests/test_diagnostic_summary.py"],
+  "success_rate": {"backend": "100% (8/8 new tests)", "frontend": "100% (5/5 requested flows)"},
+  "seed_data_creation": "Created TEST students 'TEST_ui_iter7' (id 4dad6173ce504dbbaf8c3a855e023e4b, parent PIN 1234, 1 summary) and 'TEST_ui_iter7b', plus one pytest TEST_diag_* student. Textbook and lesson data were not touched.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Stages run diagnostic -> explained -> recall_input/recalled -> quiz -> done. To use an isolated student, POST /api/students and set localStorage 'agilli-ders-student-id'. The Riyaziyyat card is subject-card-riyaziyyat. The summary bubble testid prefix is listen-btn-summary. Parent panel: parent-panel-btn -> pin-input/pin-confirm-input/pin-submit-btn (create mode for a new student) -> parent-summaries. F5 does not restore the lesson view (App returns to Home)."
+}

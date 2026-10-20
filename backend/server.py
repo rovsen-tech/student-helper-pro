@@ -911,6 +911,11 @@ class LessonSummaryRequest(BaseModel):
 @api_router.post("/lesson-summary")
 async def create_lesson_summary(req: LessonSummaryRequest, sid: str = Depends(current_student)):
     session_id = session_key(None, req.subject, req.topic, sid)
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    dup = await db.lesson_summaries.find_one({"student_id": sid, "subject": req.subject, "topic": req.topic,
+                                              "created_at": {"$gt": recent}}, {"_id": 0})
+    if dup:
+        return dup
     msgs = await db.messages.find({"session_id": session_id, **ACTIVE_MSG}).sort("created_at", -1).to_list(30)
     msgs.reverse()
     convo = "\n".join(f"{'Şagird' if m['role'] == 'user' else 'Müəllim'}: {m['content']}" for m in msgs)
@@ -932,6 +937,8 @@ async def create_lesson_summary(req: LessonSummaryRequest, sid: str = Depends(cu
     doc = {"id": str(uuid.uuid4()), "student_id": sid, "subject": req.subject, "topic": req.topic,
            "summary": text.strip(), "created_at": datetime.now(timezone.utc).isoformat()}
     await db.lesson_summaries.insert_one(doc)
+    await db.messages.insert_one({"id": str(uuid.uuid4()), "session_id": session_id, "role": "assistant",
+                                  "content": doc["summary"], "created_at": doc["created_at"]})
     return {k: v for k, v in doc.items() if k != "_id"}
 
 

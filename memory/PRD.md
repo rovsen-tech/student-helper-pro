@@ -70,3 +70,9 @@ Parent's child has weak eyesight and cannot read lessons. Build an AI system tha
 - DB preserved: 39 lessons / 79 blocks. Backup JSON in /app/backup. pytest 120 passed; iteration_6 frontend passed.
 ## Open
 - Recall button visible before diagnostic answered; Riyaziyyat card says "7 mövzu" vs 39 lessons; PDF text quality unverified.
+
+## 2026-06 — Diagnostic stage, voiced summary, real lesson count
+- Lesson stages: 1.Diaqnostika → 2.İzah → 3.Sən danış → 4.Suallar; recall button hidden until diagnostic answered.
+- "Dərsi bitir" → POST /api/lesson-summary (LLM, 2-min dedupe) → spoken, saved in lesson_summaries + chat messages; GET /api/lesson-summaries shown in Parent panel ("Dərs xülasələri").
+- /api/subjects returns lesson_count (Riyaziyyat 39 from DB, others topic count).
+- Tests: iteration_7 100%; pytest 128 passed.

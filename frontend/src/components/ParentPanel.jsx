@@ -102,7 +102,7 @@ export const ParentPanel = ({ t, studentId, onBack }) => {
               <ul className="space-y-3">
                 {summaries.map((su) => (
                   <li key={su.id} data-testid={`summary-item-${su.id}`} className="p-4 rounded-2xl bg-surface-2 border-solid-2">
-                    <p className="font-heading font-bold text-lg">{su.topic} <span className="text-secondary text-base font-semibold">· {su.subject} · {new Date(su.created_at).toLocaleDateString("az-AZ")}</span></p>
+                    <p className="font-heading font-bold text-lg">{su.topic} <span className="text-secondary text-base font-semibold">· {su.subject} · {new Date(su.created_at).toLocaleDateString("ru-RU")}</span></p>
                     <p className="text-lg mt-1">{su.summary}</p>
                   </li>
                 ))}
