@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, BarChart3, Trophy, Flame, Star, Target, AlertTriangle, HelpCircle, Loader2, Puzzle, XCircle, RotateCcw } from "lucide-react";
+import { ArrowLeft, BarChart3, Trophy, Flame, Star, Target, AlertTriangle, HelpCircle, Loader2, Puzzle, XCircle, RotateCcw, ScrollText } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -35,6 +35,7 @@ export const ParentPanel = ({ t, studentId, onBack }) => {
   const [errors, setErrors] = useState(null);
   const [analysisFailed, setAnalysisFailed] = useState(false);
   const [reload, setReload] = useState(0);
+  const [summaries, setSummaries] = useState([]);
 
   useEffect(() => {
     let alive = true;
@@ -43,9 +44,10 @@ export const ParentPanel = ({ t, studentId, onBack }) => {
     setAnalysisFailed(false);
     Promise.allSettled([
       getJson("/progress/stats"), getJson("/progress/review-questions"),
-      getJson("/progress/skill-gaps"), getJson("/progress/error-analysis"),
-    ]).then(([s, r, g, e]) => {
+      getJson("/progress/skill-gaps"), getJson("/progress/error-analysis"), getJson("/lesson-summaries"),
+    ]).then(([s, r, g, e, ls]) => {
       if (!alive) return;
+      setSummaries(ls.status === "fulfilled" ? ls.value : []);
       setGaps(g.status === "fulfilled" ? g.value.skill_gaps ?? [] : null);
       setErrors(e.status === "fulfilled" ? e.value.top_errors ?? [] : null);
       if (g.status === "rejected" || e.status === "rejected") {
@@ -94,6 +96,19 @@ export const ParentPanel = ({ t, studentId, onBack }) => {
             <Stat icon={Flame} label={t.streakLabel} value={stats.streak_days} testid="stat-streak" />
             <Stat icon={Target} label={t.topicsMasteredLabel} value={stats.topics_mastered} testid="stat-mastered" />
           </div>
+
+          <Section title={t.summaryTitle} icon={ScrollText} testid="parent-summaries">
+            {summaries.length ? (
+              <ul className="space-y-3">
+                {summaries.map((su) => (
+                  <li key={su.id} data-testid={`summary-item-${su.id}`} className="p-4 rounded-2xl bg-surface-2 border-solid-2">
+                    <p className="font-heading font-bold text-lg">{su.topic} <span className="text-secondary text-base font-semibold">· {su.subject} · {new Date(su.created_at).toLocaleDateString("az-AZ")}</span></p>
+                    <p className="text-lg mt-1">{su.summary}</p>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="text-lg text-secondary" data-testid="summaries-empty">{t.noSummaries}</p>}
+          </Section>
 
           <Section title={t.badgesTitle} icon={Trophy} testid="parent-badges">
             {badges.length ? (

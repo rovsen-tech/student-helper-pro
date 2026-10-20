@@ -52,7 +52,7 @@ export const Home = ({ t, lang, subjects, books, onSubject, onChat, onUploaded }
           const Icon = Icons[s.icon] || BookOpen;
           return (
             <button key={s.id} data-testid={`subject-card-${s.id}`} onClick={() => onSubject(s)}
-              aria-label={`${s.name} ${t.subjectCardLabel}, ${s.topics.length} ${t.lessonsCount}`}
+              aria-label={`${s.name} ${t.subjectCardLabel}, ${s.lesson_count ?? s.topics.length} ${t.lessonsCount}`}
               className="rise text-left p-6 rounded-3xl bg-surface border-solid-2 hover:-translate-y-1 transition-transform flex items-start gap-4"
               style={{ animationDelay: `${i * 45}ms` }}>
               <div className="w-16 h-16 rounded-2xl flex items-center justify-center shrink-0" style={{ background: s.color, color: "#fff" }}>
@@ -61,7 +61,7 @@ export const Home = ({ t, lang, subjects, books, onSubject, onChat, onUploaded }
               <div className="min-w-0">
                 <h3 className="font-heading font-bold text-2xl mb-1 leading-snug">{s.name}</h3>
                 <p className="text-secondary text-lg leading-relaxed">{s.description}</p>
-                <span className="inline-block mt-2 font-bold text-base" style={{ color: s.color }}>{s.topics.length} {t.lessonsCount}</span>
+                <span className="inline-block mt-2 font-bold text-base" style={{ color: s.color }}>{s.lesson_count ?? s.topics.length} {t.lessonsCount}</span>
               </div>
             </button>
           );

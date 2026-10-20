@@ -307,7 +307,12 @@ async def root():
 
 @api_router.get("/subjects")
 async def list_subjects():
-    return SUBJECTS
+    out = []
+    for subj in SUBJECTS:
+        tb_ids = [tb["id"] async for tb in db.textbooks.find({"subject_id": subj["id"]}, {"id": 1})]
+        n = await db.lessons.count_documents({"textbook_id": {"$in": tb_ids}}) if tb_ids else 0
+        out.append({**subj, "lesson_count": n or len(subj["topics"])})
+    return out
 
 
 @api_router.get("/textbooks/{subject}")
@@ -895,6 +900,45 @@ async def progress_stats(sid: str = Depends(current_student)):
 async def progress_mastery(subject: Optional[str] = None, topic: Optional[str] = None,
                            sid: str = Depends(current_student)):
     return await progress_manager.get_mastery(db, sid, subject, topic)
+
+
+class LessonSummaryRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=200)
+    topic: str = Field(..., min_length=1, max_length=200)
+    lang: str = "az"
+
+
+@api_router.post("/lesson-summary")
+async def create_lesson_summary(req: LessonSummaryRequest, sid: str = Depends(current_student)):
+    session_id = session_key(None, req.subject, req.topic, sid)
+    msgs = await db.messages.find({"session_id": session_id, **ACTIVE_MSG}).sort("created_at", -1).to_list(30)
+    msgs.reverse()
+    convo = "\n".join(f"{'Şagird' if m['role'] == 'user' else 'Müəllim'}: {m['content']}" for m in msgs)
+    prompt = (f"Dərs bitdi. Fənn: «{req.subject}», mövzu: «{req.topic}». Söhbət:\n{convo}\n\n"
+              f"Şagirdə birbaşa müraciət edərək 2-3 qısa cümlə ilə bugünkü dərsi yekunlaşdır: nə öyrəndik, "
+              f"şagirdin konkret yaxşı etdiyi bir şey və növbəti addım. Yalnız bu söhbətə əsaslan, sual vermə, emoji işlətmə.")
+    chat = make_chat(f"summary-{uuid.uuid4()}", tutor_system_message(req.lang, None, req.subject, req.topic))
+    text = ""
+    try:
+        async for ev in chat.stream_message(UserMessage(text=prompt)):
+            if isinstance(ev, TextDelta):
+                text += ev.content
+            elif isinstance(ev, StreamDone):
+                break
+    except Exception as e:
+        logger.error(f"Summary error: {e}")
+    if not text.strip():
+        raise HTTPException(502, "Xülasə hazırlana bilmədi")
+    doc = {"id": str(uuid.uuid4()), "student_id": sid, "subject": req.subject, "topic": req.topic,
+           "summary": text.strip(), "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.lesson_summaries.insert_one(doc)
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+
+@api_router.get("/lesson-summaries")
+async def list_lesson_summaries(sid: str = Depends(current_student)):
+    docs = await db.lesson_summaries.find({"student_id": sid}, {"_id": 0}).sort("created_at", -1).to_list(30)
+    return docs
 
 
 @api_router.post("/progress/lesson-complete")

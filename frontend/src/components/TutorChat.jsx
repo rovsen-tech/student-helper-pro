@@ -80,6 +80,7 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack, studentId }) => 
       const data = await res.json();
       setStage("done");
       setCelebrate(data);
+      summarizeLesson();
       if (data.first_time === false) toast.info(t.lessonAlreadyDone);
       else toast.success(`+${data.xp_earned} XP · ${data.level}${data.badge_earned ? ` · 🏅 ${data.badge_earned}` : ""}`);
       setTimeout(() => setCelebrate(null), 3500);
@@ -87,6 +88,28 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack, studentId }) => 
       console.error("Lesson complete failed", err);
       toast.error(t.lessonSaveFailed);
     } finally { setCompleting(false); }
+  };
+
+  const summarizeLesson = async () => {
+    const id = `summary${Date.now()}`;
+    setMessages((m) => [...m, { role: "assistant", content: "", id, summary: true }]);
+    setStreaming(true);
+    scrollDown();
+    try {
+      const res = await fetch(`${API}/lesson-summary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject, topic, lang }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setMessages((m) => m.map((x) => (x.id === id ? { ...x, content: data.summary } : x)));
+      speak(data.summary, id);
+    } catch (err) {
+      console.error("Summary failed", err);
+      setMessages((m) => m.filter((x) => x.id !== id));
+      toast.error(t.summaryFailed);
+    } finally { setStreaming(false); scrollDown(); }
   };
 
   const startMiniQuiz = async () => {
@@ -207,7 +230,7 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack, studentId }) => 
 
   const streamExplain = async () => {
     const ok = await runAssistant({ subject, topic, lang, explain: true, lesson_id: lessonId }, "explain", streamExplain);
-    if (ok) setStage("explained");
+    if (ok) setStage("diagnostic");
   };
 
   const startRecall = () => { setStage("recall_input"); inputRef.current?.focus(); };
@@ -246,7 +269,7 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack, studentId }) => 
         if (subject && topic) {
           let resume = null;
           try { resume = JSON.parse(resumeStore()?.getItem(resumeKey) || "null"); } catch { resume = null; }
-          setStage(resume?.key === lessonKey && resume.stage ? resume.stage : "explained");
+          setStage(resume?.key === lessonKey && resume.stage ? resume.stage : (hist.length === 1 ? "diagnostic" : "explained"));
         }
         scrollDown();
         return;
@@ -302,6 +325,7 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack, studentId }) => 
     }
     speak(result.full, aiId);
     if (effStage === "recall") setStage("recalled");
+    if (stage === "diagnostic") setStage("explained");
     if (effStage === "quiz_answer") {
       const ok = lastVerdictRef.current === true;
       setPractice((p) => ({ answered: p.answered + 1, correct: p.correct + (ok ? 1 : 0) }));
@@ -436,9 +460,10 @@ export const TutorChat = ({ t, lang, ctx, speed, voice, onBack, studentId }) => 
       {/* Stage controls (lessons only) */}
       {subject && topic && stage && (
         <div data-testid="stage-indicator" className="flex flex-wrap items-center gap-2 text-base font-semibold mt-3">
-          <span className={`px-3 py-1 rounded-full ${stage === "explained" ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>1. {t.stageExplain}</span>
-          <span className={`px-3 py-1 rounded-full ${(stage === "recall_input" || stage === "recalled") ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>2. {t.stageRecall}</span>
-          <span className={`px-3 py-1 rounded-full ${(stage === "quiz" || stage === "done") ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>3. {t.stageQuiz}</span>
+          <span data-testid="stage-chip-diagnostic" className={`px-3 py-1 rounded-full ${stage === "diagnostic" ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>1. {t.stageDiagnostic}</span>
+          <span className={`px-3 py-1 rounded-full ${stage === "explained" ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>2. {t.stageExplain}</span>
+          <span className={`px-3 py-1 rounded-full ${(stage === "recall_input" || stage === "recalled") ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>3. {t.stageRecall}</span>
+          <span className={`px-3 py-1 rounded-full ${(stage === "quiz" || stage === "done") ? "bg-accent text-white accent-fg" : "bg-surface-2 text-secondary"}`}>4. {t.stageQuiz}</span>
         </div>
       )}
       {subject && topic && !streaming && (stage === "explained" || stage === "recalled") && (
