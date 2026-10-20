@@ -25,12 +25,12 @@ export const AccessibilityTopBar = ({ t, lang, setLang, theme, setTheme, fontSte
         <div className="flex flex-wrap items-center gap-2">
           {/* Font size */}
           <div className="flex items-center gap-1 bg-surface-2 rounded-2xl p-1 border-solid-2">
-            <button data-testid="font-decrease-btn" aria-label="A-" onClick={() => setFontStep(Math.max(0, fontStep - 1))}
+            <button data-testid="font-decrease-btn" aria-label={t.fontDecrease} onClick={() => setFontStep(Math.max(0, fontStep - 1))}
               className="w-11 h-11 rounded-xl flex items-center justify-center hover:bg-accent hover:text-white transition-colors">
               <Minus size={22} />
             </button>
             <span className="font-heading font-bold text-lg w-6 text-center">A</span>
-            <button data-testid="font-increase-btn" aria-label="A+" onClick={() => setFontStep(Math.min(2, fontStep + 1))}
+            <button data-testid="font-increase-btn" aria-label={t.fontIncrease} onClick={() => setFontStep(Math.min(2, fontStep + 1))}
               className="w-11 h-11 rounded-xl flex items-center justify-center hover:bg-accent hover:text-white transition-colors">
               <Plus size={22} />
             </button>
@@ -83,7 +83,7 @@ export const AccessibilityTopBar = ({ t, lang, setLang, theme, setTheme, fontSte
           </div>
 
           {/* Parent panel */}
-          <button data-testid="parent-panel-btn" onClick={onOpenParent} title={t.parent}
+          <button data-testid="parent-panel-btn" onClick={onOpenParent} title={t.parent} aria-label={t.parent}
             className="h-[52px] px-4 rounded-2xl bg-surface-2 border-solid-2 flex items-center gap-2 font-bold text-base hover:bg-accent hover:text-white transition-colors">
             <BarChart3 size={22} /> <span className="hidden sm:inline">{t.parent}</span>
           </button>

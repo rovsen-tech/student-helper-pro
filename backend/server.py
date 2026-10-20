@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Response
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Response, Header, Depends
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -7,19 +7,26 @@ import os
 import re
 import json
 import hashlib
+import hmac
+import secrets
 import logging
 import tempfile
 from pathlib import Path
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Literal, Optional
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 from emergentintegrations.llm.chat import (
     LlmChat, UserMessage, FileContentWithMimeType, TextDelta, StreamDone,
 )
 from emergentintegrations.llm.openai import OpenAITextToSpeech
+
+from smart_notes import generate_smart_notes
+import quiz_engine
+import progress_manager
+from curriculum import get_topic_info
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -150,23 +157,43 @@ class ChatRequest(BaseModel):
     student_id: Optional[str] = None
 
 
-def session_key(book_id=None, subject=None, topic=None, student_id=None):
-    sid = (student_id or "anon")
+def session_key(book_id=None, subject=None, topic=None, student_id="default"):
     if book_id:
-        return f"{sid}-book-{book_id}"
-    if subject and topic:
-        return f"{sid}-lesson-" + hashlib.sha256(f"{subject}|{topic}".encode()).hexdigest()[:12]
-    return f"{sid}-general"
+        key = f"book-{book_id}"
+    elif subject and topic:
+        key = "lesson-" + hashlib.sha256(f"{subject}|{topic}".encode()).hexdigest()[:12]
+    else:
+        key = "general"
+    # "default" şagird köhnə açarları saxlayır ki, mövcud tarixçə itməsin.
+    return key if student_id == DEFAULT_STUDENT else f"s-{student_id}-{key}"
 
 
-async def record_activity(subject, topic, is_question):
+# ---- Şagird kimliyi (login yoxdur; profil seçimi + X-Student-Id başlığı) ----
+DEFAULT_STUDENT = progress_manager.DEFAULT_STUDENT
+_STUDENT_ID_RE = re.compile(r"^[a-f0-9]{8,40}$")
+MAX_STUDENTS = int(os.environ.get("MAX_STUDENTS", "10"))
+QUIZ_MAX_QUESTIONS = int(os.environ.get("QUIZ_MAX_QUESTIONS", "5"))
+QUIZ_DAILY_LIMIT = int(os.environ.get("QUIZ_DAILY_LIMIT", "10"))
+
+
+async def current_student(x_student_id: Optional[str] = Header(default=None)) -> str:
+    sid = (x_student_id or "").strip()
+    if not sid or sid == DEFAULT_STUDENT:
+        return DEFAULT_STUDENT
+    if not _STUDENT_ID_RE.match(sid) or not await db.students.find_one({"id": sid}):
+        raise HTTPException(404, "Şagird profili tapılmadı")
+    return sid
+
+
+async def record_activity(subject, topic, is_question, student_id="default"):
     now = datetime.now(timezone.utc).isoformat()
     update = {"$set": {"last_active": now}, "$setOnInsert": {"started_at": now}}
     if is_question:
         update["$inc"] = {"question_count": 1}
     else:
         update["$set"]["explained"] = True
-    await db.progress.update_one({"subject": subject, "topic": topic}, update, upsert=True)
+    await db.progress.update_one({"student_id": student_id, "subject": subject, "topic": topic},
+                                 update, upsert=True)
 
 
 class TTSRequest(BaseModel):
@@ -176,28 +203,59 @@ class TTSRequest(BaseModel):
     voice: str = "coral"
 
 
-def tutor_system_message(lang: str, book=None, subject=None, topic=None, lesson_source=None) -> str:
+def tutor_system_message(lang: str, book=None, subject=None, topic=None, mastery=None, lesson_source=None) -> str:
     lang_name = "Azərbaycan dilində" if lang == "az" else "Türkçe"
     base = (
-        f"Sən 'Ağıllı Müəllim' adlı diqqətli, səbirli və mehriban şəxsi müəllimsən — sadəcə chatbot deyilsən. "
-        f"Azərbaycanın 5-ci sinif milli kurikuluna uyğun, 10-11 yaşlı şagirdə dərs keçirsən. "
-        f"Şagirdin gözləri zəifdir: mətn qısa olsun, əsas məlumat sözlə çatsın. HƏMİŞƏ {lang_name} təbii, "
-        f"yaşına uyğun, sadə dildə danış. Termini deyəndə onu adi sözlə izah et və bir nümunə ver.\n"
-        f"QAYDALAR:\n"
-        f"1) Uzun monoloq qurma. Bir kiçik fikir → qısa izah → (lazımsa) nümunə → şagirdə kiçik tapşırıq. 2-4 qısa cümlə kifayətdir.\n"
-        f"2) 'Başa düşdün?' deyə soruşma. Anlamağı belə yoxla: 'Bunu öz sözlərinlə necə deyərdin?', 'Növbəti addım nədir?', 'Bunlardan hansı doğrudur, niyə?', 'İndi buna oxşar birini sən həll et.'\n"
-        f"3) Sual verəndə cavabı dərhal özün demə — şagirdə düşünməyə imkan ver.\n"
-        f"4) Minimum kömək: şagird özü edə bilirsə qarışma; kiçik ipucu kifayətdirsə, bütöv həlli vermə.\n"
-        f"5) Səhv olanda 'Yanlışdır' demə. Əvvəl düzgün hissəni qeyd et, sonra fikrin hansı addımda dəyişdiyini tap, ən kiçik ipucu ver, şagird yenidən sınasın.\n"
-        f"6) Şagird 'başa düşmədim' desə, eyni cavabı təkrarlama — izah üsulunu dəyiş: daha sadə dil, konkret nümunə, gündəlik bənzətmə, kiçik ön-biliyə qayıt.\n"
-        f"7) Boş yerə tərifləmə. Tərif konkret və qazanılmış olsun (məs: 'İpucu olmadan həll etdin'). 'Əla/Möhtəşəm' kimi boş sözləri təkrarlama.\n"
-        f"8) Şagird asanlıqla həll edirsə çətinliyi artır; çətinlik çəkirsə sadələşdir və ön-biliyi bərpa et. Məqsəd — şagirdin müstəqilliyi.\n"
-        f"Emoji işlətmə. Hər şey sakit, aydın və başa düşülən olsun."
+        f"Sən Ağıllı Dərs-in mehriban, səbirli və qayğıkeş fərdi müəllimisən. "
+        f"Şagirdlə robot kimi və ya soyuq danışma; ona birbaşa, səmimi və təbii müraciət et. "
+        f"HƏMİŞƏ {lang_name} dilində danış. 10-11 yaşlı, 5-ci sinif şagirdinə uyğun sadə sözlər "
+        f"və qısa cümlələr işlət. Şagirdin gözləri zəifdir: aydın danış, yalnız şəkilə və ya "
+        f"diaqrama baxmağı tələb edən ifadələr işlətmə. "
+        f"Dərsin izahına başladıqdan sonra mövzunu anlaşıqlı və addım-addım izah et. Hər addımda bir əsas fikrə "
+        f"diqqət yetir, izahı kiçik hissələrə böl və uzun monoloqlardan qaç. Mövzunu yalnız "
+        f"dərslik nümunələri ilə məhdudlaşdırma: gündəlik həyatdan tanış və real nümunələr gətir. "
+        f"Riyaziyyatı dəqiq, dünya səviyyəli anlayışlarla izah et və şagirdin başa düşməsinə "
+        f"kömək edəcəksə, dərslikdən kənar uyğun bilik də ver. "
+        f"Yeni dərs başlayanda mövzunun adını çəkərək şagirdi mehriban salamla, bu gün nə "
+        f"öyrənəcəyinizi 1-2 cümlə ilə de və əvvəlki biliklərini yoxlamaq üçün BİR sadə sual ver. "
+        f"Sualı verdikdən sonra dayan və şagirdin cavabını gözlə; bu ilk cavabda mövzunu izah etmə. "
+        f"Şagird cavab verdikdən sonra izaha başla. Sonrakı izahdan sonra da başa düşüb-düşmədiyini "
+        f"yoxlamaq üçün BİR qısa sual ver və cavabını gözlə. Şagirdi tələsdirmə və cavabı onun "
+        f"əvəzinə vermə. "
+        f"Şagird səhv cavab verərsə, 'səhvdir' demə və düzgün cavabı dərhal açıqlama. Əvvəlcə "
+        f"cavabında düzgün və ya yaxşı olan bir məqamı səmimi şəkildə qeyd et, sonra onu cavaba "
+        f"yaxınlaşdıran bir istiqamətləndirici sual ver. Əgər yenə səhv cavab verərsə, izah "
+        f"üsulunu dəyiş: başqa nümunə, bənzətmə və ya həll yolundan istifadə et. "
+        f"Cavab düzgün olarsa, konkret olaraq nəyi yaxşı etdiyini qısa təriflə və dərsi davam etdir. "
+        f"Hər mesajdan sonra süni təriflər söyləmə; tərifin həmişə səmimi və konkret olsun. "
+        f"Dərs sessiyasının sonunda bu gün öyrənilənləri qısa şəkildə yekunlaşdır. "
+        f"Şagird dərsi bitirdiyini bildirəndə (məsələn, «bitdi», «başa çatdı», «qurtardı», "
+        f"«bye», «sağ ol» və ya eyni mənalı ifadələr işlədəndə) və ya sən dərsin tamamlandığını "
+        f"bildirəndə, adi dərs sualı vermək əvəzinə söhbəti isti şəkildə yekunlaşdır. 2-3 cümlə ilə "
+        f"bu gün keçilənləri xülasə et, söhbətdə şagirdin həqiqətən yaxşı etdiyi konkret bir şeyi "
+        f"qeyd et və hazırkı fənn kontekstinə uyğun növbəti öyrəniləcək şeyi söylə. Fənn və mövzu "
+        f"məlumatından istifadə et, fənn adı uydurma; konkret növbəti mövzu məlum deyilsə, həmin "
+        f"fənn üzrə növbəti dərsə keçəcəyinizi bildir. "
+        f"Həmişə mehriban, ruhlandırıcı və səbirli ol."
     )
     if subject:
         base += f"\n\nHazırkı fənn: {subject}."
         if topic:
             base += f" Mövzu: «{topic}». Cavablarını bu fənn və mövzu ətrafında saxla."
+            info = get_topic_info(subject, topic)
+            if info:
+                base += (
+                    f"\nTəlim nəticələri: {'; '.join(info.get('learning_outcomes', []))}."
+                    f"\nƏsas anlayışlar: {', '.join(info.get('key_concepts', []))}."
+                    f"\nTez-tez edilən səhvlər (diqqət et): {'; '.join(info.get('common_mistakes', []))}."
+                )
+    li = (mastery or {}).get("level_index") if isinstance(mastery, dict) else None
+    if not li or li <= 1:
+        base += "\n\nUyğunlaşma: şagird bu mövzuda yenidir; daha sadə dil və daha kiçik addımlar işlət."
+    elif li >= 4:
+        base += "\n\nUyğunlaşma: şagird mövzunu mənimsəyib; ona bir az çətin, düşündürücü tapşırıq ver."
+    else:
+        base += "\n\nUyğunlaşma: şagird inkişaf edir; normal tempdə davam et."
     if lesson_source:
         base += (
             "\n\nDƏRSLİK MƏNBƏYİ (ƏSAS HƏQİQƏT — yalnız buna əsaslan, kənardan məlumat və ya "
@@ -212,6 +270,29 @@ def tutor_system_message(lang: str, book=None, subject=None, topic=None, lesson_
             f"Şagirdin suallarını bu dərsliyin məzmununa əsasən cavablandır."
         )
     return base
+
+
+# Yeni dərs başlayanda köhnə mesajlar silinmir, "archived" ilə gizlədilir (additiv sahə).
+ACTIVE_MSG = {"archived": {"$ne": True}}
+
+ADAPT_RULE = ("Cavab SƏHVDİRSƏ və ya şagird bilmədiyini deyirsə: mövzunu daha sadə dillə, kiçik addımlarla "
+              "izah et və sonra BİR asan, əsas məşq sualı ver. Cavab DÜZDÜRSƏ: qısa təriflə və növbəti "
+              "mərhələyə keç (bir az çətin məşq sualı ver). ")
+
+
+def answer_verdict_note(question_text, answer, subject=None, topic=None) -> str:
+    """Deterministik yoxlama (LLM-siz): sual tək sadə əməldirsə, şagirdin cavabını hesablayıb qeyd qaytarır.
+    Kəsr bərabərliyi nəzərə alınır (1/2 == 2/4). Səhvdə kurikulumdan uyğun ipucu (common_mistakes) əlavə olunur.
+    Yoxlamaq mümkün deyilsə boş sətir."""
+    verdict = quiz_engine.check_arithmetic(question_text or "", answer or "")
+    if verdict is True:
+        return "Sistem yoxlaması: şagirdin cavabı DÜZDÜR. "
+    if verdict is False:
+        hint = _best_hint(question_text, (get_topic_info(subject, topic) or {}).get("common_mistakes", [])) \
+            if subject and topic else None
+        return ("Sistem yoxlaması: şagirdin cavabı SƏHVDİR. "
+                + (f"Ehtimal olunan səhv (kurikulum): {hint}. Bunu mehribanca düzəlt. " if hint else ""))
+    return ""
 
 
 def make_chat(session_id: str, system_message: str) -> LlmChat:
@@ -328,32 +409,61 @@ async def upload_book(file: UploadFile = File(...), lang: str = Form("az")):
 
 
 @api_router.post("/chat")
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, sid: str = Depends(current_student)):
     book = None
     if req.book_id:
         book = await db.books.find_one({"id": req.book_id})
-    session_id = session_key(req.book_id, req.subject, req.topic, req.student_id)
+    session_id = session_key(req.book_id, req.subject, req.topic, sid)
+    mastery = None
+    try:
+        if req.subject and req.topic:
+            ms = await progress_manager.get_mastery(db, sid, req.subject, req.topic)
+            mastery = ms[0] if ms else None
+    except Exception:
+        mastery = None
     lesson_source = None
     if req.lesson_id:
         ldoc = await db.lessons.find_one({"id": req.lesson_id})
         if ldoc:
-            parts = []
-            for c in ldoc.get("content", []):
-                if c.get("provenance") == "SOURCE" and c.get("type") != "answer":
-                    parts.append(c.get("normalized_text") or c.get("text", ""))
+            parts = [c.get("normalized_text") or c.get("text", "") for c in ldoc.get("content", [])
+                     if c.get("provenance") == "SOURCE" and c.get("type") != "answer"]
             pref = ""
             if ldoc.get("page_start"):
                 pref = f"(səhifə {ldoc['page_start']}-{ldoc.get('page_end', ldoc['page_start'])}) "
             lesson_source = pref + "\n".join(p for p in parts if p)
-    sysmsg = tutor_system_message(req.lang, book, req.subject, req.topic, lesson_source)
+    sysmsg = tutor_system_message(req.lang, book, req.subject, req.topic, mastery, lesson_source)
 
-    history = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(20)
+    # FIX: əvvəl ən KÖHNƏ 20 mesaj götürülürdü (sort asc + limit), uzun dərsdə kontekst köhnəlirdi.
+    # İndi ən YENİ 20 mesaj götürülür və xronoloji sıraya qaytarılır. Arxivlənmişlər nəzərə alınmır.
+    history = await db.messages.find({"session_id": session_id, **ACTIVE_MSG}) \
+        .sort("created_at", -1).to_list(20)
+    history.reverse()
     chat = make_chat(session_id, sysmsg)
+    practice_verdict = None  # quiz_answer üçün deterministik hökm (True/False/None) — frontend mini-quiz təklifi üçün
 
     if req.explain:
-        user_text = (f"«{req.topic}» mövzusunu 5-ci sinif şagirdinə uyğun, maraqlı və sadə "
-                     f"şəkildə, gündəlik nümunələrlə izah et. Qısa və aydın saxla. "
-                     f"Sonda şagirdə de ki, indi növbə onundur və bu mövzunu öz sözləri ilə danışmalıdır.")
+        # FIX: delete_many əvəzinə additiv arxivləmə — yeni dərs köhnə tarixçəni SİLMİR, sadəcə gizlədir.
+        await db.messages.update_many({"session_id": session_id, **ACTIVE_MSG},
+                                      {"$set": {"archived": True}})
+        user_text = (f"Yeni dərs başlayır. Fənn: «{req.subject}». Bugünkü mövzu: «{req.topic}». "
+                     f"Şagirdi bu mövzunun adı ilə mehriban salamla. 1-2 cümlə ilə bu gün nə "
+                     f"öyrənəcəyinizi söylə, sonra əvvəlki biliklərini yoxlamaq üçün mövzuya uyğun "
+                     f"BİR sadə diaqnostik sual ver. Mövzunu hələ izah etmə, suala cavab və ya "
+                     f"ipucu vermə; sualdan sonra dayan və şagirdin cavabını gözlə. "
+                     f"Cavabından sonra izaha başlayacaqsan.")
+    elif (req.subject and req.topic and len(history) == 1
+          and history[0].get("role") == "assistant"):
+        if req.message:
+            await db.messages.insert_one({
+                "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
+                "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        # FIX: diaqnostik cavab düz/səhv kontekstinə görə açıq uyğunlaşma qaydası alır;
+        # mümkün olduqda (tək sadə əməl, məs. "1/4 + 2/4 neçədir?") qərar deterministikdir.
+        user_text = (f"Şagird cavab verdi: «{req.message}». Bu, onun cavablandırdığı ilk "
+                     f"diaqnostik sualdır. {answer_verdict_note(history[0].get('content'), req.message, req.subject, req.topic)}"
+                     f"{ADAPT_RULE} Mövzunu şagirdin əvvəlki biliklərinə uyğun, sadə addımlarla və "
+                     f"gündəlik nümunələrlə öyrət. Cavabına uyğun mehriban reaksiya ver; ilkin sualı təkrarlama.")
     elif req.stage == "recall":
         if req.message:
             await db.messages.insert_one({
@@ -372,7 +482,10 @@ async def chat_stream(req: ChatRequest):
                 "id": str(uuid.uuid4()), "session_id": session_id, "role": "user",
                 "content": req.message, "created_at": datetime.now(timezone.utc).isoformat(),
             })
+        last_q = next((m.get("content") for m in reversed(history) if m.get("role") == "assistant"), "")
+        practice_verdict = quiz_engine.check_arithmetic(last_q or "", req.message or "")
         user_text = (f"Bu, verdiyin sonuncu suala şagirdin cavabıdır:\n«{req.message}»\n"
+                     f"{answer_verdict_note(last_q, req.message, req.subject, req.topic)}"
                      f"Əgər cavab doğrudursa, onu təriflə və dərhal növbəti qısa sualı ver. "
                      f"Əgər cavab səhvdirsə və ya şagird bilmədiyini deyirsə, həmin mövzunu müəllimdən daha "
                      f"yaxşı, daha sadə şəkildə, gündəlik nümunə ilə yenidən izah et, sonra asan bir sual ver. "
@@ -396,7 +509,7 @@ async def chat_stream(req: ChatRequest):
         a_subject, a_topic = "Yüklənən kitablar", book.get("title", "Kitab")
     else:
         a_subject, a_topic = "Ümumi söhbət", "Suallar"
-    await record_activity(a_subject, a_topic, (not req.explain) and bool(req.message))
+    await record_activity(a_subject, a_topic, (not req.explain) and bool(req.message), sid)
 
     async def gen():
         full = ""
@@ -419,22 +532,23 @@ async def chat_stream(req: ChatRequest):
             "id": str(uuid.uuid4()), "session_id": session_id, "role": "assistant",
             "content": full, "created_at": datetime.now(timezone.utc).isoformat(),
         })
-        yield f"data: {json.dumps({'done': True})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'verdict': practice_verdict})}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @api_router.get("/messages")
-async def get_messages(book_id: str = None, subject: str = None, topic: str = None, student_id: str = None):
-    session_id = session_key(book_id, subject, topic, student_id)
-    docs = await db.messages.find({"session_id": session_id}).sort("created_at", 1).to_list(200)
+async def get_messages(book_id: str = None, subject: str = None, topic: str = None,
+                       sid: str = Depends(current_student)):
+    session_id = session_key(book_id, subject, topic, sid)
+    docs = await db.messages.find({"session_id": session_id, **ACTIVE_MSG}).sort("created_at", 1).to_list(200)
     return [{"role": d["role"], "content": d["content"], "id": d["id"]} for d in docs]
 
 
 @api_router.get("/progress")
-async def get_progress():
-    docs = await db.progress.find({}).sort("last_active", -1).to_list(1000)
+async def get_progress(sid: str = Depends(current_student)):
+    docs = await db.progress.find({"student_id": sid}).sort("last_active", -1).to_list(1000)
     by_subject = {}
     total_q = 0
     for d in docs:
@@ -499,6 +613,36 @@ async def tts(req: TTSRequest):
         logger.error(f"TTS cache store failed: {e}")
     return Response(content=audio, media_type="audio/mpeg",
                     headers={"Cache-Control": "public, max-age=31536000"})
+
+
+# ---- Smart Notes (ekstraktiv, sıfır xərcli, MongoDB-yə YAZMIR) ----
+class SmartNotesMessage(BaseModel):
+    role: str = Field(default="assistant", max_length=20)
+    content: str = Field(default="", max_length=8000)
+
+
+class SmartNotesRequest(BaseModel):
+    lesson_id: Optional[str] = Field(default=None, max_length=200)
+    subject: Optional[str] = Field(default=None, max_length=200)
+    topic: Optional[str] = Field(default=None, max_length=200)
+    lang: Literal["az", "en"] = "az"
+    exam_mode: bool = False
+    conversation: List[SmartNotesMessage] = Field(default_factory=list, max_length=100)
+
+    @field_validator("lang", mode="before")
+    @classmethod
+    def normalize_lang(cls, v):
+        return v if v in ("az", "en") else "az"
+
+
+@api_router.post("/notes/generate")
+def generate_notes(req: SmartNotesRequest):
+    notes = generate_smart_notes(
+        [m.model_dump() for m in req.conversation],
+        subject=req.subject, topic=req.topic, lang=req.lang, exam_mode=req.exam_mode,
+    )
+    notes["lesson_id"] = req.lesson_id
+    return notes
 
 
 SUBJECTS = [
@@ -586,11 +730,346 @@ async def startup():
         logger.info("Storage initialized")
     except Exception as e:
         logger.error(f"Storage init failed: {e}")
-    await db.books.delete_many({"is_sample": True})
-    await db.textbooks.delete_many({"id": "tb-riyaziyyat-5"})
-    await db.sections.delete_many({"textbook_id": "tb-riyaziyyat-5"})
-    await db.lessons.delete_many({"textbook_id": "tb-riyaziyyat-5"})
+    try:
+        await progress_manager.ensure_indexes(db)
+        logger.info("Indexes ensured")
+    except Exception as e:
+        logger.error(f"Index setup failed: {e}")
     logger.info("Startup complete")
+
+
+# ---- Quiz + Progress / Gamification (LLM + MongoDB) ----
+class QuizGenerateRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=200)
+    topic: str = Field(..., min_length=1, max_length=200)
+    lang: str = "az"
+    difficulty: Literal["easy", "medium", "hard"] = "easy"
+    n_questions: int = Field(default=5, ge=1, le=10)
+
+
+class QuizSubmitRequest(BaseModel):
+    quiz_id: str = Field(..., max_length=100)
+    question_id: str = Field(..., max_length=20)
+    student_answer: str = Field(default="", max_length=2000)
+    subject: Optional[str] = Field(default=None, max_length=200)
+    topic: Optional[str] = Field(default=None, max_length=200)
+
+
+class LessonCompleteRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=200)
+    topic: str = Field(..., min_length=1, max_length=200)
+
+
+def _public_question(q: dict) -> dict:
+    return {k: v for k, v in q.items() if k != "correct_answer"}
+
+
+class StudentCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=40)
+    grade: str = Field(default="5", max_length=10)
+
+
+@api_router.get("/students")
+async def list_students():
+    docs = await db.students.find({}, {"_id": 0}).sort("created_at", 1).to_list(MAX_STUDENTS)
+    return [{"id": DEFAULT_STUDENT, "name": "Əsas profil", "grade": "5"}] + docs
+
+
+@api_router.post("/students")
+async def create_student(req: StudentCreateRequest):
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(422, "Ad boş ola bilməz")
+    if await db.students.count_documents({}) >= MAX_STUDENTS:
+        raise HTTPException(400, f"Ən çox {MAX_STUDENTS} profil yaratmaq olar")
+    doc = {"id": uuid.uuid4().hex, "name": name, "grade": req.grade.strip() or "5",
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.students.insert_one(dict(doc))
+    return doc
+
+
+@api_router.post("/quiz/generate")
+async def quiz_generate(req: QuizGenerateRequest, sid: str = Depends(current_student)):
+    today = datetime.now(timezone.utc).date().isoformat()
+    used = await db.quizzes.count_documents({"student_id": sid, "created_at": {"$gte": today}})
+    if used >= QUIZ_DAILY_LIMIT:
+        raise HTTPException(429, "Bu gün üçün quiz limiti doldu. Sabah yenidən cəhd et! 🌙")
+    n = min(req.n_questions, QUIZ_MAX_QUESTIONS)
+    try:
+        questions, dropped = await quiz_engine.generate_quiz_checked(
+            make_chat, req.topic, req.subject, req.lang, req.difficulty, n)
+    except Exception as e:
+        logger.error(f"Quiz generation failed: {e}")
+        questions, dropped = [], 0
+    if len(questions) < min(3, n):
+        raise HTTPException(502, "Yoxlamadan keçən kifayət qədər sual hazırlanmadı, yenidən cəhd et")
+    quiz_id = str(uuid.uuid4())
+    await db.quizzes.insert_one({
+        "quiz_id": quiz_id, "student_id": sid, "subject": req.subject, "topic": req.topic,
+        "difficulty": req.difficulty, "questions": questions, "answers": {}, "completed": False,
+        "perfect_awarded": False, "created_at": datetime.now(timezone.utc).isoformat(),
+        "meta": {"grade": "5", "lang": req.lang, "model": f"{MODEL_PROVIDER}/{MODEL_NAME}",
+                 "validation_version": quiz_engine.VALIDATION_VERSION, "dropped_questions": dropped,
+                 "source": "llm-generated"},
+    })
+    # Düzgün cavab yalnız serverdə saxlanılır; ipucu müştəriyə göndərilir.
+    return {"quiz_id": quiz_id, "questions": [_public_question(q) for q in questions]}
+
+
+@api_router.post("/quiz/submit")
+async def quiz_submit(req: QuizSubmitRequest, sid: str = Depends(current_student)):
+    # Sahiblik yoxlaması: başqa şagirdin quizi 404 qaytarır.
+    quiz = await db.quizzes.find_one({"quiz_id": req.quiz_id, "student_id": sid})
+    if not quiz:
+        raise HTTPException(404, "Quiz tapılmadı")
+    question = next((q for q in quiz["questions"] if q["id"] == req.question_id), None)
+    if not question:
+        raise HTTPException(404, "Sual tapılmadı")
+    if req.question_id in quiz.get("answers", {}):
+        prev = quiz["answers"][req.question_id]
+        return {**prev, "xp_earned": 0, "already_answered": True}
+    subject, topic = quiz["subject"], quiz["topic"]
+    result = await quiz_engine.evaluate_answer(make_chat, question, req.student_answer)
+    # Eyni sualın iki dəfə XP qazanmasının qarşısını atomik şəkildə alırıq.
+    claim = await db.quizzes.update_one(
+        {"quiz_id": req.quiz_id, "student_id": sid, f"answers.{req.question_id}": {"$exists": False}},
+        {"$set": {f"answers.{req.question_id}": {**result, "student_answer": req.student_answer}}})
+    if not claim.modified_count:
+        return {**result, "xp_earned": 0, "already_answered": True}
+    xp = await progress_manager.record_quiz_answer(db, sid, req.quiz_id, question, subject, topic,
+                                                   result["correct"])
+    response = {**result, "xp_earned": xp, "correct_answer": question["correct_answer"],
+                "hint": question.get("hint", ""), "quiz_complete": False, "perfect": False}
+    quiz = await db.quizzes.find_one({"quiz_id": req.quiz_id, "student_id": sid})
+    answers = quiz.get("answers", {})
+    if len(answers) >= len(quiz["questions"]):
+        perfect = all(a.get("correct") for a in answers.values())
+        n_correct = sum(1 for a in answers.values() if a.get("correct"))
+        await db.quizzes.update_one({"quiz_id": req.quiz_id}, {"$set": {
+            "completed": True, "correct_count": n_correct,
+            "completed_at": datetime.now(timezone.utc).isoformat()}})
+        response.update(quiz_complete=True, perfect=perfect,
+                        correct_count=n_correct, total=len(quiz["questions"]))
+        if perfect:
+            mark = await db.quizzes.update_one({"quiz_id": req.quiz_id, "perfect_awarded": False},
+                                               {"$set": {"perfect_awarded": True}})
+            if mark.modified_count:
+                bonus = await progress_manager.record_perfect_quiz(db, sid, subject, topic)
+                response["xp_earned"] += bonus["xp"]
+                response["bonus_xp"] = bonus["xp"]
+                response["badge_earned"] = bonus["badge"]
+        mastery = await progress_manager.get_mastery(db, sid, subject, topic)
+        response["mastery"] = mastery[0] if mastery else None
+    return response
+
+
+@api_router.get("/quiz/history")
+async def quiz_history(subject: Optional[str] = None, topic: Optional[str] = None,
+                       sid: str = Depends(current_student)):
+    query = {"student_id": sid}
+    if subject:
+        query["subject"] = subject
+    if topic:
+        query["topic"] = topic
+    docs = await db.quizzes.find(query, {"_id": 0}).sort("created_at", -1).to_list(5)
+    return [{
+        "quiz_id": d["quiz_id"], "subject": d["subject"], "topic": d["topic"],
+        "difficulty": d.get("difficulty"), "created_at": d.get("created_at"),
+        "completed": d.get("completed", False), "total": len(d.get("questions", [])),
+        "answered": len(d.get("answers", {})),
+        "correct_count": sum(1 for a in d.get("answers", {}).values() if a.get("correct")),
+    } for d in docs]
+
+
+@api_router.get("/progress/stats")
+async def progress_stats(sid: str = Depends(current_student)):
+    return await progress_manager.get_student_stats(db, sid)
+
+
+@api_router.get("/progress/mastery")
+async def progress_mastery(subject: Optional[str] = None, topic: Optional[str] = None,
+                           sid: str = Depends(current_student)):
+    return await progress_manager.get_mastery(db, sid, subject, topic)
+
+
+@api_router.post("/progress/lesson-complete")
+async def progress_lesson_complete(req: LessonCompleteRequest, sid: str = Depends(current_student)):
+    topics = next((s["topics"] for s in SUBJECTS if s["name"] == req.subject), None)
+    return await progress_manager.record_lesson_complete(db, sid, req.subject, req.topic, topics)
+
+
+# ---------------- Curriculum / review / parent PIN (additive) ----------------
+@api_router.get("/curriculum/{subject}/{topic}")
+async def curriculum_topic(subject: str, topic: str):
+    info = get_topic_info(subject, topic)
+    if not info:
+        raise HTTPException(404, "Mövzu tapılmadı")
+    return info
+
+
+@api_router.get("/progress/review-questions")
+async def review_questions(sid: str = Depends(current_student)):
+    mastery = await progress_manager.get_mastery(db, sid)
+    weak = [m for m in mastery if m.get("answered", 0) > 0 and m.get("level_index", 0) < 4]
+    weak.sort(key=lambda m: (m.get("level_index", 0), m.get("recent_accuracy_pct", 0)))
+    items = []
+    for m in weak:
+        for q in m.get("review_questions", []) or []:
+            items.append({"subject": m["subject"], "topic": m["topic"], "question": q, "source": "mistake"})
+    for m in weak:
+        info = get_topic_info(m["subject"], m["topic"]) or {}
+        for sp in info.get("sample_problems", []):
+            items.append({"subject": m["subject"], "topic": m["topic"], "question": sp["question"],
+                          "answer": sp.get("answer"), "source": "curriculum"})
+    return {"weak_topics": [{"subject": m["subject"], "topic": m["topic"], "level": m.get("level"),
+                             "level_index": m.get("level_index")} for m in weak],
+            "items": items[:5]}
+
+
+@api_router.get("/progress/skill-gaps")
+async def skill_gaps(sid: str = Depends(current_student)):
+    """Read-only: weak (subject, topic) pairs mapped to curriculum skill areas. No LLM, no DB writes."""
+    gaps = []
+    for m in await progress_manager.get_mastery(db, sid):
+        answered = m.get("answered", 0)
+        if not answered or m.get("level_index", 0) >= 4:
+            continue
+        correct = m.get("distinct_correct", 0)
+        info = get_topic_info(m["subject"], m["topic"]) or {}
+        gaps.append({
+            "subject": m["subject"], "topic": m["topic"],
+            "wrong_count": answered - correct, "correct_count": correct,
+            "accuracy_pct": round(100 * correct / answered),
+            "mastery_level": m.get("level"),
+            "common_mistakes": info.get("common_mistakes", []),
+            "key_concepts": info.get("key_concepts", []),
+        })
+    gaps.sort(key=lambda g: (g["accuracy_pct"], -g["wrong_count"]))
+    return {"skill_gaps": gaps}
+
+
+def _best_hint(question: str, mistakes: list) -> Optional[str]:
+    """Pick the curriculum common_mistake sharing most words with the question (fallback: first)."""
+    if not mistakes:
+        return None
+    words = set(re.findall(r"\w+", (question or "").lower()))
+    return max(mistakes, key=lambda m: len(words & set(re.findall(r"\w+", m.lower()))))
+
+
+@api_router.get("/progress/error-analysis")
+async def error_analysis(sid: str = Depends(current_student)):
+    """Read-only: most frequent wrong answers per question, with a curriculum hint. No LLM, no DB writes."""
+    docs = await db.quiz_answers.find({"student_id": sid, "correct": False}, {"_id": 0}).to_list(5000)
+    groups = {}
+    for d in docs:
+        key = d.get("question_key") or progress_manager.question_key(d.get("question"))
+        g = groups.setdefault(key, {"question": d.get("question"), "subject": d.get("subject"),
+                                    "topic": d.get("topic"), "wrong_count": 0})
+        g["wrong_count"] += 1
+    top = sorted(groups.values(), key=lambda g: -g["wrong_count"])[:10]
+    for g in top:
+        info = get_topic_info(g["subject"], g["topic"]) or {}
+        g["hint"] = _best_hint(g["question"], info.get("common_mistakes", []))
+    return {"top_errors": top}
+
+
+class PinSet(BaseModel):
+    pin: str = Field(pattern=r"^\d{4}$")
+    old_pin: Optional[str] = None
+
+
+class PinVerify(BaseModel):
+    pin: str
+
+
+def _pin_hash(salt: str, pin: str) -> str:
+    return hashlib.sha256((salt + pin).encode()).hexdigest()
+
+
+async def _check_pin(pin: str) -> bool:
+    doc = await db.parent_settings.find_one({"_id": "parent"})
+    if not doc or not doc.get("pin_hash"):
+        return False
+    return hmac.compare_digest(_pin_hash(doc["salt"], pin or ""), doc["pin_hash"])
+
+
+@api_router.get("/parent/pin-status")
+async def parent_pin_status():
+    doc = await db.parent_settings.find_one({"_id": "parent"})
+    return {"has_pin": bool(doc and doc.get("pin_hash"))}
+
+
+@api_router.post("/parent/pin")
+async def parent_set_pin(req: PinSet):
+    doc = await db.parent_settings.find_one({"_id": "parent"})
+    if doc and doc.get("pin_hash") and not await _verify_with_lock(req.old_pin or ""):
+        raise HTTPException(403, "Köhnə PIN yanlışdır")
+    salt = secrets.token_hex(16)
+    await db.parent_settings.update_one(
+        {"_id": "parent"},
+        {"$set": {"pin_hash": _pin_hash(salt, req.pin), "salt": salt,
+                  "failed_attempts": 0, "locked_until": None,
+                  "updated_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True)
+    return {"ok": True}
+
+
+PIN_MAX_FAILS = 5
+PIN_LOCK_SECONDS = 300
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _lock_remaining(doc) -> int:
+    """Seconds left on the brute-force lock (0 = not locked)."""
+    until = (doc or {}).get("locked_until")
+    if not until:
+        return 0
+    try:
+        left = (datetime.fromisoformat(until) - _now()).total_seconds()
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int(left + 0.999))
+
+
+def _lock_error(seconds: int) -> HTTPException:
+    minutes = max(1, (seconds + 59) // 60)
+    return HTTPException(
+        status_code=429,
+        detail=f"Çox sayda səhv PIN cəhdi oldu. Təhlükəsizlik üçün {minutes} dəqiqə gözləyin və yenidən cəhd edin.",
+        headers={"Retry-After": str(seconds)})
+
+
+async def _verify_with_lock(pin: str) -> bool:
+    """Checks PIN with brute-force protection (additive fields in parent_settings).
+    Raises 429 while locked; the 5th consecutive failure starts a lock; success resets the counter."""
+    doc = await db.parent_settings.find_one({"_id": "parent"})
+    if not doc or not doc.get("pin_hash"):
+        return False
+    left = _lock_remaining(doc)
+    if left:
+        raise _lock_error(left)
+    if hmac.compare_digest(_pin_hash(doc["salt"], pin or ""), doc["pin_hash"]):
+        if doc.get("failed_attempts") or doc.get("locked_until"):
+            await db.parent_settings.update_one(
+                {"_id": "parent"}, {"$set": {"failed_attempts": 0, "locked_until": None}})
+        return True
+    fails = (0 if doc.get("locked_until") else doc.get("failed_attempts", 0)) + 1
+    if fails >= PIN_MAX_FAILS:
+        until = (_now() + timedelta(seconds=PIN_LOCK_SECONDS)).isoformat()
+        await db.parent_settings.update_one(
+            {"_id": "parent"}, {"$set": {"failed_attempts": 0, "locked_until": until}})
+        raise _lock_error(PIN_LOCK_SECONDS)
+    await db.parent_settings.update_one(
+        {"_id": "parent"}, {"$set": {"failed_attempts": fails, "locked_until": None}})
+    return False
+
+
+@api_router.post("/parent/verify")
+async def parent_verify(req: PinVerify):
+    return {"ok": await _verify_with_lock(req.pin)}
 
 
 app.include_router(api_router)

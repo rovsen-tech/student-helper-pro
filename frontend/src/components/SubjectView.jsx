@@ -53,7 +53,7 @@ export const SubjectView = ({ t, subject, onBack, onLesson }) => {
   return (
     <div className="max-w-5xl mx-auto px-4 py-8">
       <div className="flex items-center gap-4 mb-10">
-        <button data-testid="subject-back-btn" onClick={onBack}
+        <button data-testid="subject-back-btn" onClick={onBack} aria-label={t.back}
           className="w-12 h-12 rounded-2xl bg-surface border-solid-2 flex items-center justify-center hover:bg-surface-2 transition-colors shrink-0">
           <ArrowLeft size={26} />
         </button>

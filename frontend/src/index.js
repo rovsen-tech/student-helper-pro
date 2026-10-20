@@ -4,6 +4,9 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import "@/index.css";
 import App from "@/App";
 import { queryClient } from "@/lib/queryClient";
+import { installStudentHeader } from "@/lib/studentSession";
+
+installStudentHeader();
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(
