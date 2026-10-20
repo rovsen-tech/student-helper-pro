@@ -944,7 +944,15 @@ async def create_lesson_summary(req: LessonSummaryRequest, sid: str = Depends(cu
 
 @api_router.get("/lesson-summaries")
 async def list_lesson_summaries(sid: str = Depends(current_student)):
-    docs = await db.lesson_summaries.find({"student_id": sid}, {"_id": 0}).sort("created_at", -1).to_list(30)
+    docs = await db.lesson_summaries.aggregate([
+        {"$match": {"student_id": sid}},
+        {"$sort": {"created_at": -1}},
+        {"$group": {"_id": {"s": "$subject", "t": "$topic"}, "doc": {"$first": "$$ROOT"}}},
+        {"$replaceRoot": {"newRoot": "$doc"}},
+        {"$project": {"_id": 0}},
+        {"$sort": {"subject": 1, "created_at": -1}},
+        {"$limit": 50},
+    ]).to_list(50)
     return docs
 
 
