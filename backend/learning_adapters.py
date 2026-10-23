@@ -103,6 +103,18 @@ def _extra(record: dict[str, Any], mapped: set[str]) -> dict[str, Any]:
     return {key: copy.deepcopy(value) for key, value in record.items() if key not in mapped}
 
 
+def _available_metadata_key(metadata: dict[str, Any], base: str) -> str:
+    """Keep the legacy key when free; otherwise find a key absent from all source fields."""
+    if base not in metadata:
+        return base
+    suffix = 1
+    while True:
+        candidate = f"__adapter_generated_{base}_{suffix}__"
+        if candidate not in metadata:
+            return candidate
+        suffix += 1
+
+
 def _adapted(
     *, entity_type: str, contract_type: str, contract: BaseModel,
     record: dict[str, Any], metadata: dict[str, Any],
@@ -203,7 +215,8 @@ def adapt_legacy_lesson(document: Mapping[str, Any]) -> AdaptedLegacyRecord:
     )
     unmapped = _extra(record, {"id", "textbook_id", "section_id", "title", "order", "content"})
     if any(nested_metadata):
-        unmapped["content_unmapped_fields"] = nested_metadata
+        metadata_key = _available_metadata_key(unmapped, "content_unmapped_fields")
+        unmapped[metadata_key] = nested_metadata
     return _adapted(
         entity_type="lesson",
         contract_type="ContentNode",

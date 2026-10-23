@@ -167,6 +167,56 @@ class LegacyAdapterTests(unittest.TestCase):
         second = adapt_legacy_lesson(original).model_dump(mode="json")
         self.assertEqual(first, second)
 
+    def test_nested_metadata_stays_aligned_with_content_order(self):
+        adapted = adapt_legacy_lesson(source_lesson())
+        nested = adapted.legacy_metadata["content_unmapped_fields"]
+        self.assertEqual(len(nested), len(adapted.contract["content_blocks"]))
+        self.assertEqual(nested[0]["layout_hint"], {"column": 1})
+        self.assertEqual(nested[0]["source_page"], 17)
+        self.assertEqual(nested[1]["source_page"], 18)
+
+    def test_metadata_collision_preserves_original_and_generated_values(self):
+        original = source_lesson()
+        original["content_unmapped_fields"] = {"owner": "legacy", "items": [None, "kept"]}
+        original["__adapter_generated_content_unmapped_fields_1__"] = {"sentinel": 1}
+        original["__adapter_generated_content_unmapped_fields_2__"] = {"sentinel": 2}
+        before = copy.deepcopy(original)
+
+        adapted = adapt_legacy_lesson(original)
+        metadata = adapted.legacy_metadata
+        self.assertEqual(metadata["content_unmapped_fields"], original["content_unmapped_fields"])
+        self.assertEqual(metadata["__adapter_generated_content_unmapped_fields_1__"], {"sentinel": 1})
+        self.assertEqual(metadata["__adapter_generated_content_unmapped_fields_2__"], {"sentinel": 2})
+        generated = metadata["__adapter_generated_content_unmapped_fields_3__"]
+        self.assertEqual(len(generated), len(adapted.contract["content_blocks"]))
+        self.assertEqual(generated[0]["layout_hint"], {"column": 1})
+        self.assertEqual(generated[1]["source_page"], 18)
+        self.assertEqual(original, before)
+        self.assertEqual(reconstruct_legacy_document(adapted), before)
+
+        serialized = adapted.model_dump(mode="json")
+        self.assertEqual(reconstruct_legacy_document(serialized), before)
+        self.assertEqual(adapt_legacy_lesson(original).model_dump(mode="json"), serialized)
+
+    def test_noncollision_keeps_legacy_nested_metadata_key_unchanged(self):
+        adapted = adapt_legacy_lesson(source_lesson())
+        self.assertIn("content_unmapped_fields", adapted.legacy_metadata)
+        self.assertEqual(adapted.legacy_metadata["content_unmapped_fields"][0]["layout_hint"], {"column": 1})
+        self.assertFalse(any(key.startswith("__adapter_generated_") for key in adapted.legacy_metadata))
+
+    def test_empty_missing_and_null_legacy_values_keep_existing_reconstruction(self):
+        cases = [
+            {"id": "l", "textbook_id": "b", "section_id": "s", "title": "L"},
+            {"id": "l", "textbook_id": "b", "section_id": "s", "title": "L", "content": []},
+            {"id": "l", "textbook_id": "b", "section_id": "s", "title": "L",
+             "content": [], "content_unmapped_fields": None, "notes": []},
+        ]
+        for original in cases:
+            with self.subTest(original=original):
+                adapted = adapt_legacy_lesson(original)
+                self.assertEqual(reconstruct_legacy_document(adapted), original)
+                self.assertEqual(reconstruct_legacy_document(adapted.model_dump(mode="json")), original)
+
     def test_invalid_required_fields_ranges_provenance_and_json_values_fail(self):
         with self.assertRaises(ValueError):
             adapt_legacy_textbook({"id": "  ", "title": "T"})
