@@ -1,4 +1,5 @@
 import json
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -175,6 +176,109 @@ class PDFSourceExtractorTests(unittest.TestCase):
         self.assertIsNone(extractor._bbox((0, 0, float("nan"), 5)))
         self.assertIsNone(extractor._bbox((0, 0, float("inf"), 5)))
         self.assertEqual(extractor._bbox((-1, 2, 3, 5)), [-1.0, 2.0, 3.0, 5.0])
+
+    def test_each_suspicious_span_is_marked_without_changing_raw_text(self):
+        path = self.root / "span_warnings.pdf"
+        _save_pdf(path, ["original text"])
+        original_get_text = pymupdf.Page.get_text
+
+        def inject_suspicious_spans(page, option="text", *args, **kwargs):
+            result = original_get_text(page, option, *args, **kwargs)
+            if option == "dict":
+                line = result["blocks"][0]["lines"][0]
+                first = line["spans"][0]
+                first["text"] = "\x03raw-one"
+                first["font"] = "SegoeUI"
+                second = copy.deepcopy(first)
+                second["text"] = "\x04raw-two"
+                second["font"] = "SourceSansVariable-Roman"
+                second["bbox"] = (first["bbox"][0], first["bbox"][1] + 20, first["bbox"][2], first["bbox"][3] + 20)
+                line["spans"].append(second)
+            return result
+
+        with patch.object(pymupdf.Page, "get_text", new=inject_suspicious_spans):
+            result = extractor.extract_pdf(path)
+        page = result["pages"][0]
+        self.assertEqual([span["raw_text"] for span in page["text_elements"]], ["\x03raw-one", "\x04raw-two"])
+        self.assertEqual([span["warnings"][0]["code"] for span in page["text_elements"]], [
+            "suspicious_text_encoding", "suspicious_source_font_text",
+        ])
+        self.assertTrue(all("derived_text" not in span for span in page["text_elements"]))
+        self.assertEqual(page["extraction_status"]["text"], "partial")
+        self.assertEqual([w["affected_span_count"] for w in page["warnings"] if "affected_span_count" in w], [1, 1])
+
+    def test_channel_errors_produce_separate_partial_statuses_and_keep_other_pages(self):
+        path = self.root / "partial.pdf"
+        _save_pdf(path, ["first page", "second page"])
+        original_get_text = pymupdf.Page.get_text
+        original_get_image_info = pymupdf.Page.get_image_info
+
+        def fail_first_page_text(page, *args, **kwargs):
+            if page.number == 0:
+                raise RuntimeError("simulated text extraction failure")
+            return original_get_text(page, *args, **kwargs)
+
+        def fail_first_page_placements(page, *args, **kwargs):
+            if page.number == 0:
+                raise RuntimeError("simulated image placement failure")
+            return original_get_image_info(page, *args, **kwargs)
+
+        with patch.object(pymupdf.Page, "get_text", new=fail_first_page_text), \
+             patch.object(pymupdf.Page, "get_image_info", new=fail_first_page_placements):
+            result = extractor.extract_pdf(path)
+
+        first, second = result["pages"]
+        self.assertEqual(first["extraction_status"]["text"], "failed")
+        self.assertEqual(first["extraction_status"]["images"], "partial")
+        self.assertEqual(first["extraction_status"]["image_resources"], "complete")
+        self.assertEqual(first["extraction_status"]["image_placements"], "failed")
+        self.assertEqual(second["extraction_status"]["text"], "complete")
+        self.assertEqual(second["extraction_status"]["images"], "complete")
+        self.assertEqual(result["extraction_status"]["text"], "partial")
+        self.assertEqual(result["extraction_status"]["images"], "partial")
+        self.assertEqual(first["text_elements"], [])
+        self.assertEqual(second["text_elements"][0]["raw_text"], "second page")
+
+    def test_page_dimensions_failure_is_explicit_without_masking_text_or_image_results(self):
+        path = self.root / "dimensions.pdf"
+        _save_pdf(path, ["dimensions test"])
+
+        def fail_rect(_page):
+            raise RuntimeError("simulated page geometry failure")
+
+        with patch.object(pymupdf.Page, "rect", new=property(fail_rect)):
+            result = extractor.extract_pdf(path)
+        page = result["pages"][0]
+        self.assertEqual(page["dimensions"], {"width": None, "height": None, "unit": "pdf_points"})
+        self.assertEqual(page["extraction_status"]["page_metadata"], "failed")
+        self.assertEqual(page["extraction_status"]["text"], "complete")
+        self.assertEqual(page["extraction_status"]["images"], "complete")
+        self.assertEqual(page["text_elements"][0]["raw_text"], "dimensions test")
+
+    def test_both_image_operations_failing_marks_image_channel_failed(self):
+        path = self.root / "image_failure.pdf"
+        _save_pdf(path, ["text remains available"])
+
+        def fail_images(*_args, **_kwargs):
+            raise RuntimeError("simulated image extraction failure")
+
+        with patch.object(pymupdf.Page, "get_images", new=fail_images), \
+             patch.object(pymupdf.Page, "get_image_info", new=fail_images):
+            result = extractor.extract_pdf(path)
+        page = result["pages"][0]
+        self.assertEqual(page["extraction_status"]["text"], "complete")
+        self.assertEqual(page["extraction_status"]["images"], "failed")
+        self.assertEqual(page["extraction_status"]["image_resources"], "failed")
+        self.assertEqual(page["extraction_status"]["image_placements"], "failed")
+        self.assertEqual(page["text_elements"][0]["raw_text"], "text remains available")
+        self.assertEqual(result["extraction_status"]["images"], "failed")
+
+    def test_unexpected_programming_error_is_not_swallowed(self):
+        path = self.root / "programming_error.pdf"
+        _save_pdf(path, ["trigger"])
+        with patch.object(pymupdf.Page, "get_text", side_effect=TypeError("programming error")):
+            with self.assertRaisesRegex(TypeError, "programming error"):
+                extractor.extract_pdf(path)
 
 
 if __name__ == "__main__":

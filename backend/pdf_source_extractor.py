@@ -81,6 +81,21 @@ def _span_id(fingerprint: str, page_number: int, order: int) -> str:
     return f"sha256:{fingerprint}:p{page_number}:span{order}"
 
 
+def _aggregate_status(statuses: list[str]) -> str:
+    if statuses and all(status == "failed" for status in statuses):
+        return "failed"
+    if statuses and all(status == "complete" for status in statuses):
+        return "complete"
+    return "partial"
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def extract_pdf(pdf_path: str | Path) -> dict[str, Any]:
     """Extract deterministic, JSON-serializable observations from a local PDF.
 
@@ -122,35 +137,110 @@ def extract_pdf(pdf_path: str | Path) -> dict[str, Any]:
 
         warnings: list[dict[str, Any]] = []
         pages: list[dict[str, Any]] = []
+        text_statuses: list[str] = []
+        image_statuses: list[str] = []
+        metadata_statuses: list[str] = []
         for index in range(page_count):
             page_number = index + 1
-            page = document[index]
             page_warnings: list[dict[str, Any]] = []
+            try:
+                page = document[index]
+            except (pymupdf.FileDataError, RuntimeError, ValueError):
+                page_warnings.append({"code": "page_access_error", "message": "PyMuPDF could not access this page."})
+                text_statuses.append("failed")
+                image_statuses.append("failed")
+                metadata_statuses.append("failed")
+                warnings.extend({"pdf_page_number": page_number, **warning} for warning in page_warnings)
+                pages.append({
+                    "id": f"sha256:{fingerprint}:p{page_number}",
+                    "pdf_page_number": page_number,
+                    "printed_page_number": None,
+                    "dimensions": {"width": None, "height": None, "unit": "pdf_points"},
+                    "coordinate_system": {"origin": "top_left", "unit": "pdf_points", "bbox_order": "x0,y0,x1,y1"},
+                    "extraction_status": {"text": "failed", "images": "failed", "image_resources": "failed", "image_placements": "failed", "page_metadata": "failed"},
+                    "text_elements": [], "image_resources": [], "image_placements": [], "warnings": page_warnings,
+                })
+                continue
+            page_width: float | None = None
+            page_height: float | None = None
+            metadata_status = "complete"
+            try:
+                page_rect = page.rect
+                page_width = _finite_number(page_rect.width)
+                page_height = _finite_number(page_rect.height)
+            except (pymupdf.FileDataError, RuntimeError, ValueError):
+                metadata_status = "failed"
+                page_warnings.append({"code": "page_dimensions_error", "message": "Page dimensions could not be read."})
+            if metadata_status == "complete" and (
+                page_width is None or page_height is None or page_width <= 0 or page_height <= 0
+            ):
+                metadata_status = "partial"
+                page_warnings.append({"code": "invalid_page_dimensions", "message": "Page dimensions are unavailable or invalid."})
+
+            text_status = "complete"
+            try:
+                text_dict = page.get_text("dict", sort=False)
+            except (pymupdf.FileDataError, RuntimeError, ValueError):
+                text_dict = None
+                text_status = "failed"
+                page_warnings.append({"code": "text_extraction_error", "message": "PyMuPDF could not extract page text."})
+            if text_status != "failed" and not isinstance(text_dict, dict):
+                text_status = "failed"
+                page_warnings.append({"code": "invalid_text_result", "message": "PyMuPDF returned an unsupported page-text result."})
+
             suspicious_span_counts: dict[str, int] = {}
             spans: list[dict[str, Any]] = []
             image_resources: list[dict[str, Any]] = []
             image_placements: list[dict[str, Any]] = []
-
-            try:
-                page_rect = page.rect
-                width = _finite_number(page_rect.width)
-                height = _finite_number(page_rect.height)
-                if width is None or height is None or width <= 0 or height <= 0:
-                    page_warnings.append({"code": "invalid_page_dimensions", "message": "Page dimensions are unavailable or invalid."})
-
-                text_dict = page.get_text("dict", sort=False)
+            if text_status != "failed":
                 span_order = 0
-                for block_index, block in enumerate(text_dict.get("blocks", [])):
-                    for line_index, line in enumerate(block.get("lines", [])):
-                        for span_index, span in enumerate(line.get("spans", [])):
+                text_blocks = text_dict.get("blocks", [])
+                if not isinstance(text_blocks, list):
+                    text_blocks = []
+                    text_status = "partial"
+                    page_warnings.append({"code": "invalid_text_blocks", "message": "PyMuPDF returned an unsupported block list."})
+                for block_index, block in enumerate(text_blocks):
+                    if not isinstance(block, dict):
+                        text_status = "partial"
+                        page_warnings.append({"code": "invalid_text_block", "message": f"Text block {block_index} has an unsupported record shape."})
+                        continue
+                    lines = block.get("lines", [])
+                    if not isinstance(lines, list):
+                        text_status = "partial"
+                        page_warnings.append({"code": "invalid_text_lines", "message": f"Text block {block_index} has an unsupported line list."})
+                        continue
+                    for line_index, line in enumerate(lines):
+                        if not isinstance(line, dict):
+                            text_status = "partial"
+                            page_warnings.append({"code": "invalid_text_line", "message": f"Text line {line_index} has an unsupported record shape."})
+                            continue
+                        line_spans = line.get("spans", [])
+                        if not isinstance(line_spans, list):
+                            text_status = "partial"
+                            page_warnings.append({"code": "invalid_text_spans", "message": f"Text line {line_index} has an unsupported span list."})
+                            continue
+                        for span_index, span in enumerate(line_spans):
+                            if not isinstance(span, dict):
+                                text_status = "partial"
+                                page_warnings.append({"code": "invalid_text_span", "message": f"Text span {span_index} has an unsupported record shape."})
+                                continue
                             raw_text = span.get("text", "")
                             if not isinstance(raw_text, str):
                                 raw_text = str(raw_text)
                             span_order += 1
                             box = _bbox(span.get("bbox"))
+                            span_warnings: list[dict[str, str]] = []
                             if box is None:
-                                page_warnings.append({"code": "invalid_span_bbox", "message": f"Text span {span_order} has missing, non-finite, or degenerate geometry."})
+                                warning = {"code": "invalid_span_bbox"}
+                                span_warnings.append(warning)
+                                page_warnings.append({**warning, "message": f"Text span {span_order} has missing, non-finite, or degenerate geometry."})
+                                text_status = "partial"
                             font_size = _finite_number(span.get("size"))
+                            if font_size is None:
+                                warning = {"code": "invalid_span_font_size"}
+                                span_warnings.append(warning)
+                                page_warnings.append({**warning, "message": f"Text span {span_order} has missing or invalid font-size metadata."})
+                                text_status = "partial"
                             spans.append({
                                 "id": _span_id(fingerprint, page_number, span_order),
                                 "pdf_page_number": page_number,
@@ -162,70 +252,124 @@ def extract_pdf(pdf_path: str | Path) -> dict[str, Any]:
                                 "font": span.get("font"),
                                 "font_size": font_size,
                                 "bbox_pdf_points": box,
+                                "warnings": span_warnings,
                             })
                             if _suspicious_unicode(raw_text):
                                 if "SourceSans" in str(span.get("font", "")):
                                     warning_code = "suspicious_source_font_text"
                                 else:
                                     warning_code = "suspicious_text_encoding"
+                                spans[-1]["warnings"].append({"code": warning_code})
                                 suspicious_span_counts[warning_code] = suspicious_span_counts.get(warning_code, 0) + 1
-
-                # get_images reports page resources; get_image_info reports actual
-                # raster placements. These are intentionally separate records.
-                for resource_index, image in enumerate(page.get_images(full=True), start=1):
-                    xref = int(image[0]) if image and image[0] is not None else 0
-                    image_resources.append({
-                        "id": f"sha256:{fingerprint}:p{page_number}:image-resource{resource_index}",
-                        "pdf_page_number": page_number,
-                        "resource_index": resource_index,
-                        "xref": xref,
-                        "width": int(image[2]) if len(image) > 2 else None,
-                        "height": int(image[3]) if len(image) > 3 else None,
-                        "bits_per_component": int(image[4]) if len(image) > 4 else None,
-                        "colorspace": str(image[5]) if len(image) > 5 else None,
-                        "soft_mask_xref": int(image[1]) if len(image) > 1 else None,
-                    })
-                for placement_index, info in enumerate(page.get_image_info(xrefs=True), start=1):
-                    box = _bbox(info.get("bbox"))
-                    if box is None:
-                        page_warnings.append({"code": "invalid_image_bbox", "message": f"Raster placement {placement_index} has missing, non-finite, or degenerate geometry."})
-                    xref_value = info.get("xref")
-                    xref = int(xref_value) if xref_value is not None else 0
-                    image_placements.append({
-                        "id": f"sha256:{fingerprint}:p{page_number}:image-placement{placement_index}",
-                        "pdf_page_number": page_number,
-                        "placement_index": placement_index,
-                        "xref": xref,
-                        "bbox_pdf_points": box,
-                        "width": int(info["width"]) if info.get("width") is not None else None,
-                        "height": int(info["height"]) if info.get("height") is not None else None,
-                        "x_resolution": int(info["xres"]) if info.get("xres") is not None else None,
-                        "y_resolution": int(info["yres"]) if info.get("yres") is not None else None,
-                        "colorspace_components": int(info["colorspace"]) if info.get("colorspace") is not None else None,
-                        "bits_per_component": int(info["bpc"]) if info.get("bpc") is not None else None,
-                    })
                 for warning_code, span_count in suspicious_span_counts.items():
+                    text_status = "partial"
                     if warning_code == "suspicious_source_font_text":
                         message = "SourceSans text contains control or private-use characters; raw PyMuPDF text is retained without correction."
                     else:
                         message = "Text contains control or private-use characters; raw PyMuPDF text is retained without correction."
                     page_warnings.append({"code": warning_code, "message": message, "affected_span_count": span_count})
-                if not any(span["raw_text"] for span in spans):
+                if text_status != "failed" and not any(span["raw_text"] for span in spans):
                     page_warnings.append({"code": "empty_extracted_text", "message": "No non-empty text spans were returned for this page; image-only, vector, blank, or non-text content is possible."})
-            except Exception:
-                page_warnings.append({"code": "page_extraction_error", "message": "Page extraction failed; available partial observations are retained."})
 
+            resource_status = "complete"
+            try:
+                resource_entries = page.get_images(full=True)
+            except (pymupdf.FileDataError, RuntimeError, ValueError):
+                resource_entries = []
+                resource_status = "failed"
+                page_warnings.append({"code": "image_resource_extraction_error", "message": "PyMuPDF could not enumerate page image resources."})
+            if not isinstance(resource_entries, (tuple, list)):
+                resource_entries = []
+                resource_status = "failed"
+                page_warnings.append({"code": "invalid_image_resource_result", "message": "PyMuPDF returned an unsupported image-resource result."})
+            for resource_index, image in enumerate(resource_entries, start=1):
+                if not isinstance(image, (tuple, list)):
+                    resource_status = "partial"
+                    page_warnings.append({"code": "invalid_image_resource", "message": f"Image resource {resource_index} has an unsupported record shape."})
+                    continue
+                xref = _optional_int(image[0]) if len(image) > 0 else None
+                width = _optional_int(image[2]) if len(image) > 2 else None
+                height = _optional_int(image[3]) if len(image) > 3 else None
+                bpc = _optional_int(image[4]) if len(image) > 4 else None
+                soft_mask = _optional_int(image[1]) if len(image) > 1 else None
+                if xref is None or width is None or height is None:
+                    resource_status = "partial"
+                    page_warnings.append({"code": "incomplete_image_resource", "message": f"Image resource {resource_index} has missing or invalid metadata."})
+                image_resources.append({
+                    "id": f"sha256:{fingerprint}:p{page_number}:image-resource{resource_index}",
+                    "pdf_page_number": page_number,
+                    "resource_index": resource_index,
+                    "xref": xref if xref is not None else 0,
+                    "width": width,
+                    "height": height,
+                    "bits_per_component": bpc,
+                    "colorspace": str(image[5]) if len(image) > 5 else None,
+                    "soft_mask_xref": soft_mask,
+                })
+
+            placement_status = "complete"
+            try:
+                placement_entries = page.get_image_info(xrefs=True)
+            except (pymupdf.FileDataError, RuntimeError, ValueError):
+                placement_entries = []
+                placement_status = "failed"
+                page_warnings.append({"code": "image_placement_extraction_error", "message": "PyMuPDF could not enumerate raster image placements."})
+            if not isinstance(placement_entries, (tuple, list)):
+                placement_entries = []
+                placement_status = "failed"
+                page_warnings.append({"code": "invalid_image_placement_result", "message": "PyMuPDF returned an unsupported image-placement result."})
+            for placement_index, info in enumerate(placement_entries, start=1):
+                if not isinstance(info, dict):
+                    placement_status = "partial"
+                    page_warnings.append({"code": "invalid_image_placement", "message": f"Raster placement {placement_index} has an unsupported record shape."})
+                    continue
+                box = _bbox(info.get("bbox"))
+                xref = _optional_int(info.get("xref"))
+                width = _optional_int(info.get("width"))
+                height = _optional_int(info.get("height"))
+                xres = _optional_int(info.get("xres"))
+                yres = _optional_int(info.get("yres"))
+                colorspace = _optional_int(info.get("colorspace"))
+                bpc = _optional_int(info.get("bpc"))
+                if box is None:
+                    placement_status = "partial"
+                    page_warnings.append({"code": "invalid_image_bbox", "message": f"Raster placement {placement_index} has missing, non-finite, or degenerate geometry."})
+                if width is None or height is None:
+                    placement_status = "partial"
+                    page_warnings.append({"code": "incomplete_image_placement", "message": f"Raster placement {placement_index} has missing or invalid metadata."})
+                image_placements.append({
+                    "id": f"sha256:{fingerprint}:p{page_number}:image-placement{placement_index}",
+                    "pdf_page_number": page_number,
+                    "placement_index": placement_index,
+                    "xref": xref if xref is not None else 0,
+                    "bbox_pdf_points": box,
+                    "width": width,
+                    "height": height,
+                    "x_resolution": xres,
+                    "y_resolution": yres,
+                    "colorspace_components": colorspace,
+                    "bits_per_component": bpc,
+                })
+
+            image_status = _aggregate_status([resource_status, placement_status])
+            text_statuses.append(text_status)
+            image_statuses.append(image_status)
+            metadata_statuses.append(metadata_status)
             if page_warnings:
                 warnings.extend({"pdf_page_number": page_number, **warning} for warning in page_warnings)
-            rect = page.rect
-            page_width = _finite_number(rect.width)
-            page_height = _finite_number(rect.height)
             pages.append({
                 "id": f"sha256:{fingerprint}:p{page_number}",
                 "pdf_page_number": page_number,
                 "printed_page_number": None,
                 "dimensions": {"width": page_width, "height": page_height, "unit": "pdf_points"},
                 "coordinate_system": {"origin": "top_left", "unit": "pdf_points", "bbox_order": "x0,y0,x1,y1"},
+                "extraction_status": {
+                    "text": text_status,
+                    "images": image_status,
+                    "image_resources": resource_status,
+                    "image_placements": placement_status,
+                    "page_metadata": metadata_status,
+                },
                 "text_elements": spans,
                 "image_resources": image_resources,
                 "image_placements": image_placements,
@@ -238,6 +382,11 @@ def extract_pdf(pdf_path: str | Path) -> dict[str, Any]:
             "extraction_library": {"name": "PyMuPDF", "version": str(pymupdf.VersionBind)},
             "source_sha256": fingerprint,
             "pdf_page_count": page_count,
+            "extraction_status": {
+                "text": _aggregate_status(text_statuses),
+                "images": _aggregate_status(image_statuses),
+                "page_metadata": _aggregate_status(metadata_statuses),
+            },
             "limitations": list(_LIMITATIONS),
             "warnings": warnings,
             "pages": pages,
