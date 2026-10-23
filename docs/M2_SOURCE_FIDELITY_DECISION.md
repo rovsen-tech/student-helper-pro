@@ -1,6 +1,8 @@
-# M2-B0: source fidelity decision for the first math lesson
+# M2: source fidelity decision and first verified lesson excerpt
 
-**Status: NEEDS SOURCE VERIFICATION**
+**M2-B0 status at that audit:** NEEDS SOURCE VERIFICATION
+
+**M2-B1 status:** Selected excerpt visually verified; educator review remains pending.
 
 **Topic:** Grade 5, section 2.8, division of common fractions
 
@@ -8,11 +10,11 @@
 
 **SHA-256:** `ccd7a084ff36b50ccdc5a35f955df7e451fa28ff4dda346468924d5f0bc30d30`
 
-## Decision
+## M2-B0 decision snapshot
 
-Do not build the first AI lesson from the current extracted text or from the local `curriculum.py` entry. The PDF page is visually legible, but important title/body fonts produce incorrect PyMuPDF text and fraction layout is not preserved semantically. No reliable general decoder was established. The most efficient safe route is to obtain a small, human-verified lesson excerpt with explicit source references, then encode only that reviewed excerpt. This is not enough evidence to author a lesson now: the example below verifies the section title only.
+At the time of the M2-B0 audit, do not build the first AI lesson from the current extracted text or from the local `curriculum.py` entry. The PDF page is visually legible, but important title/body fonts produce incorrect PyMuPDF text and fraction layout is not preserved semantically. No reliable general decoder was established. That audit could verify the section title only. The M2-B1 visual review below supersedes that evidence limit for the specific rule, worked example, and first exercise transcribed below; it does not validate the rest of the page or an entire lesson.
 
-## Evidence sample
+## M2-B0 evidence snapshot
 
 | Content | Source location | Provenance | Check | Status |
 |---|---|---|---|---|
@@ -39,12 +41,27 @@ The old `_decode_span()` in `backend/ingest_textbook.py` was inspected as source
 
 No independent local source was found that verifies the teaching explanation, examples, task wording, or answers for this exact lesson. No external source was searched.
 
+## M2-B1: visual verification and minimal M1 sample
+
+The PDF was rendered read-only with PyMuPDF to a temporary PNG and opened for direct visual inspection. The render was not saved in the repository. PDF page 73 shows printed page 71. The following visible text was transcribed directly from the page image and compared with the misencoded PyMuPDF text; it was not reconstructed from the damaged strings.
+
+| Claim/content | PDF location | Provenance and check | Status |
+|---|---|---|---|
+| `Bölmə əməlini bölənin tərsi olan ədədə vurma ilə əvəz etmək olar.` | Page 73, text near `[56.7, 384.5, 411.7, 399.5]` PDF points; raw dict block 28, line 0, spans 0-1. | SOURCE; transcribed from rendered page and checked against the visible sentence. | verified |
+| `1/3 : 2 = 1/3 · 1/2 = 1/6` | Page 73, formula near `[216.2, 570.1, 307.4, 593.9]` PDF points; raw dict block 34, text spans 0-12 include separate digits/operators. | SOURCE; visually transcribed. Separately calculated `Fraction(1, 3) / 2 = Fraction(1, 6)`. | verified |
+| Exercise 1: `Təsvirlərə uyğun bölmə əməlini yazın və qisməti tapın.` Subparts: `a) 1/2 : 3`, `b) 2/3 : 5`, `c) 4/5 : 8`. | Page 73, instruction near `[62.3, 631.9, 376.1, 649.2]` PDF points; diagrams and labels around y=656-714. Numerator/denominator glyphs and division labels occur as separate spans; diagrams are visual. | SOURCE; full instruction and all three diagram expressions checked against the rendered page. | verified |
+| Exercise results: `a) 1/6; b) 2/15; c) 1/10` | Derived only from the three verified expressions above; no textbook answer key is asserted. | DERIVED; independently calculated with exact rational arithmetic: `1/2 / 3`, `2/3 / 5`, `4/5 / 8`. | verified calculation; not a SOURCE answer |
+
+The offline sample is [grade5_fraction_division_seed.json](../backend/data/grade5_fraction_division_seed.json). It validates as M1 `SourceDocument`, `ContentNode`, `ContentBlock`, and `PageReference` data. Every block points to the PDF document and page 73 / printed page 71. The source document remains `review_required` and the node remains `pending`; those statuses avoid implying educator approval. The three transcribed source blocks use `SOURCE`; the separately calculated results use `DERIVED` and have no `original_text`.
+
+The excerpt is visually verified against this PDF, not independently reviewed by a math educator or publisher. Beyond these exact items, the surrounding explanation, any additional examples, the official answer key, and pedagogical correctness remain unverified. This seed is not a complete interactive lesson.
+
 ## Tests and scope
 
-Preflight confirmed branch `architecture/universal-learning-os`, expected HEAD `fd8ff166b4b339ee8a08f0adb3c0d7851119a6f`, clean worktree, and the PDF hash above. Runtime versions were Python 3.12.10, PyMuPDF 1.28.2, and Pydantic 2.13.4 (the requirements file pins Pydantic 2.13.5; no packages were installed).
+M2-B0 preflight was on branch `architecture/universal-learning-os` at expected HEAD `fd8ff166b4b339ee8a08f0adb3c0d7851119a6f`. M2-B1 preflight confirmed the same branch, HEAD `1e23d214a0def5d23cf6a0263d287111e77498bc`, clean worktree, and the PDF hash above. Runtime versions were Python 3.12.10, PyMuPDF 1.28.2, and Pydantic 2.13.4 (the requirements file pins Pydantic 2.13.5; no packages were installed).
 
-Ran from `backend`: `python -m unittest tests.test_learning_contracts tests.test_learning_adapters tests.test_pdf_source_extractor` - **34 tests passed**. PDF inspection and extraction were in-memory/read-only. No application/importer/server import, database access, PDF write, dependency change, or existing-data mutation was performed.
+Ran from `backend`: `python -m unittest tests.test_learning_contracts tests.test_learning_adapters tests.test_pdf_source_extractor tests.test_grade5_fraction_lesson_seed` - **37 tests passed** (34 existing M1/M2-A tests and 3 new seed/arithmetic tests). PDF inspection and extraction were read-only; the temporary rendered image was opened for visual inspection. No application/importer/server import, database access, PDF modification, dependency change, or existing-data mutation was performed.
 
 ## Next step
 
-Ask a math educator or authorized textbook owner to verify a minimal excerpt for this exact lesson against the original page, including the rule, one worked example, and one exercise with all fraction bars/operators and any answer key checked independently. Record each item with PDF page, bounding box or span evidence, reviewer, verification method, and review status. If the printed PDF is ambiguous, request the publisher/source document with usable text mappings or an editable master. Only then map approved items into M1 source blocks and draft the first lesson; keep extracted raw text unchanged and preserve any reviewed transcription separately as derived text.
+Have a math educator review the visually transcribed excerpt and independently check the derived exercise results. Then verify the remaining lesson content and any official answer key against an authoritative source before drafting the first interactive lesson. Keep the PDF raw extraction unchanged and retain this reviewed transcription as a separate source-grounded seed.

@@ -1,0 +1,76 @@
+{
+  "source_document": {
+    "schema_version": 1,
+    "id": "mathbook-grade5",
+    "title": "mathbook.pdf",
+    "document_type": "textbook",
+    "file_hash": "ccd7a084ff36b50ccdc5a35f955df7e451fa28ff4dda346468924d5f0bc30d30",
+    "original_asset": "backend/mathbook.pdf",
+    "ingestion_status": "review_required"
+  },
+  "content_node": {
+    "schema_version": 1,
+    "id": "grade5-fractions-division-2-8",
+    "source_document_id": "mathbook-grade5",
+    "node_type": "lesson_excerpt",
+    "title": "2.8. Adi k\u0259sl\u0259rin b\u00f6l\u00fcnm\u0259si",
+    "order": 8,
+    "page_refs": [
+      {"printed_page": 71, "pdf_page": 73}
+    ],
+    "review_status": "pending",
+    "content_blocks": [
+      {
+        "content_type": "rule",
+        "provenance": "SOURCE",
+        "text": "B\u00f6lm\u0259 \u0259m\u0259lini b\u00f6l\u0259nin t\u0259rsi olan \u0259d\u0259d\u0259 vurma il\u0259 \u0259v\u0259z etm\u0259k olar.",
+        "original_text": "B\u00f6lm\u0259 \u0259m\u0259lini b\u00f6l\u0259nin t\u0259rsi olan \u0259d\u0259d\u0259 vurma il\u0259 \u0259v\u0259z etm\u0259k olar.",
+        "source_refs": [{
+          "source_document_id": "mathbook-grade5",
+          "content_node_id": "grade5-fractions-division-2-8",
+          "page_refs": [{
+            "printed_page": 71,
+            "pdf_page": 73,
+            "bbox": {"x": 56.7, "y": 384.5, "width": 355.0, "height": 15.0, "coordinate_space": "pdf_points"}
+          }]
+        }]
+      },
+      {
+        "content_type": "worked_example",
+        "provenance": "SOURCE",
+        "text": "1/3 : 2 = 1/3 \u00b7 1/2 = 1/6",
+        "original_text": "1/3 : 2 = 1/3 \u00b7 1/2 = 1/6",
+        "source_refs": [{
+          "source_document_id": "mathbook-grade5",
+          "content_node_id": "grade5-fractions-division-2-8",
+          "page_refs": [{
+            "printed_page": 71,
+            "pdf_page": 73,
+            "bbox": {"x": 216.2, "y": 570.1, "width": 91.2, "height": 23.8, "coordinate_space": "pdf_points"}
+          }]
+        }]
+      },
+      {
+        "content_type": "exercise",
+        "provenance": "SOURCE",
+        "text": "T\u0259svirl\u0259r\u0259 uy\u011fun b\u00f6lm\u0259 \u0259m\u0259lini yaz\u0131n v\u0259 qism\u0259ti tap\u0131n. a) 1/2 : 3; b) 2/3 : 5; c) 4/5 : 8.",
+        "original_text": "T\u0259svirl\u0259r\u0259 uy\u011fun b\u00f6lm\u0259 \u0259m\u0259lini yaz\u0131n v\u0259 qism\u0259ti tap\u0131n. a) 1/2 : 3; b) 2/3 : 5; c) 4/5 : 8.",
+        "source_refs": [{
+          "source_document_id": "mathbook-grade5",
+          "content_node_id": "grade5-fractions-division-2-8",
+          "page_refs": [{"printed_page": 71, "pdf_page": 73}]
+        }]
+      },
+      {
+        "content_type": "calculated_answers",
+        "provenance": "DERIVED",
+        "text": "a) 1/6; b) 2/15; c) 1/10",
+        "source_refs": [{
+          "source_document_id": "mathbook-grade5",
+          "content_node_id": "grade5-fractions-division-2-8",
+          "page_refs": [{"printed_page": 71, "pdf_page": 73}]
+        }]
+      }
+    ]
+  }
+}
